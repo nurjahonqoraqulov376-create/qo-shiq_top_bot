@@ -1,10 +1,10 @@
-"""Qo'shiq variantlari: slowed, speed up, slowed + reverb, bass boost.
+"""Qo'shiq variantlari: original, slowed, slowed + reverb, speed up.
 
 Topilgan qo'shiqning to'liq audiosi yuklab olinadi va ffmpeg filtrlari
 yordamida turli variantlar tayyorlanadi.
 
 `asetrate` sample rate'ni o'zgartiradi - bu tezlikni ham, tovush balandligini
-(pitch) ham o'zgartiradi. Aynan shu narsa "slowed" va "nightcore" effektini
+(pitch) ham o'zgartiradi. Aynan shu narsa "slowed" effektini
 beradi. Manba audiosi doim 44100 Hz ga keltirilgani uchun natija bashorat
 qilinadigan bo'ladi.
 """
@@ -72,30 +72,18 @@ VARIANTS: dict[str, Variant] = {
         note="sped up",
         speed=1.22,
     ),
-    "night": Variant(
-        key="night",
-        label="🌙 Nightcore",
-        suffix=" (nightcore)",
-        audio_filter=f"asetrate={RATE}*1.30,aresample={RATE},atempo=1.05",
-        note="nightcore",
-        speed=1.365,
-    ),
-    "bass": Variant(
-        key="bass",
-        label="🔊 Bass Boost",
-        suffix=" (bass boosted)",
-        audio_filter="bass=g=12:f=90:w=0.7,alimiter=limit=0.95",
-        note="bass boosted",
-        speed=1.0,
-    ),
 }
 
-# Tugmalar joylashuvi (har bir ichki ro'yxat - bitta qator)
-KEYBOARD_ROWS: tuple[tuple[str, ...], ...] = (
-    ("orig", "slow"),
-    ("reverb", "fast"),
-    ("night", "bass"),
-)
+# Tugma bosilishi bilan avtomatik yuboriladigan variant
+AUTO_KEY = "orig"
+
+# Tugmalarda ko'rsatiladigan tartib
+ORDER: tuple[str, ...] = ("orig", "slow", "reverb", "fast")
+
+
+def other_keys(exclude: str) -> list[str]:
+    """Yuborilgan variantdan boshqalarini qaytaradi (tugmalar uchun)."""
+    return [key for key in ORDER if key != exclude and key in VARIANTS]
 
 
 def get(key: str) -> Variant | None:

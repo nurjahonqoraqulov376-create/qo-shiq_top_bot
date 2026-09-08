@@ -67,30 +67,33 @@ def esc(text: str | None) -> str:
 
 
 def find_button(token: str, again: bool = False) -> InlineKeyboardMarkup:
-    label = "🔄 Qayta urinish" if again else "🎵 Qo'shiqni top"
+    label = "🔄 Qayta urinish" if again else "🎵 Qo'shiqni yuklash"
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"song:{token}")]]
     )
 
 
-def result_keyboard(track: Track, token: str) -> InlineKeyboardMarkup:
-    query = quote_plus(f"{track.artist} {track.title}".strip()[:200])
+def variant_keyboard(token: str, exclude: str) -> InlineKeyboardMarkup:
+    """Audio ostidagi tugmalar: yuborilgandan boshqa variantlar."""
+    keys = variants.other_keys(exclude)
     rows: list[list[InlineKeyboardButton]] = []
-
-    # 1) Audio variantlari - asosiy imkoniyat
-    for row in variants.KEYBOARD_ROWS:
-        buttons = [
+    for index in range(0, len(keys), 2):
+        rows.append([
             InlineKeyboardButton(
                 text=variants.VARIANTS[key].label,
                 callback_data=f"v:{token}:{key}",
             )
-            for key in row
-            if key in variants.VARIANTS
-        ]
-        if buttons:
-            rows.append(buttons)
+            for key in keys[index:index + 2]
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
-    # 2) Tashqi havolalar (faqat http(s) qabul qilinadi)
+
+def result_keyboard(track: Track, token: str) -> InlineKeyboardMarkup:
+    """Qo'shiq kartochkasi ostidagi tashqi havolalar."""
+    query = quote_plus(f"{track.artist} {track.title}".strip()[:200])
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # Faqat http(s) havolalar qabul qilinadi
     links: list[InlineKeyboardButton] = []
     shazam_url = safe_link(track.url)
     if shazam_url:
@@ -130,8 +133,6 @@ def format_track(track: Track) -> str:
         "",
         f"📊 Ishonchlilik: <b>{track.confidence}</b> "
         f"({track.hits}/{max(track.attempts, track.hits)} moslik)",
-        "",
-        "👇 <b>Variantni tanlang:</b>",
     ]
     return "\n".join(lines)
 
@@ -388,11 +389,15 @@ async def on_find_song(callback: CallbackQuery) -> None:
     job.result = asdict(track)
     job.not_found = False
     await storage.update(job)
+
+    # Avval qo'shiq kartochkasi, so'ng audiosi o'zi yuboriladi -
+    # foydalanuvchi qo'shimcha tugma bosishi shart emas.
     await send_result(message, track, token)
+    await deliver_variant(message, job, track, variants.AUTO_KEY)
 
 
 # --------------------------------------------------------------------------- #
-# Audio variantlari: Original / Slowed / Reverb / Speed Up / Nightcore / Bass
+# Audio variantlari: Original / Slowed / Slowed + Reverb / Speed Up
 # --------------------------------------------------------------------------- #
 def safe_filename(name: str) -> str:
     """Fayl nomidan xavfli belgilarni olib tashlaydi."""
@@ -431,65 +436,39 @@ async def fetch_cover(url: str, work_dir: Path) -> Path | None:
     return thumb
 
 
-@router.callback_query(F.data.startswith("v:"))
-async def on_variant(callback: CallbackQuery) -> None:
-    parts = (callback.data or "").split(":")
-    message = callback.message
-    if len(parts) != 3 or message is None:
-        await callback.answer()
-        return
-
-    _, token, key = parts
+async def deliver_variant(message: Message, job: Job, track: Track, key: str) -> bool:
+    """Variantni tayyorlab, audio qilib yuboradi. Yuborilsa True qaytaradi."""
     variant = variants.get(key)
     if variant is None:
-        await callback.answer()
-        return
+        return False
 
-    user_id = callback.from_user.id if callback.from_user else 0
-    if not security.is_allowed_user(user_id):
-        await callback.answer(texts.NOT_ALLOWED, show_alert=True)
-        return
-
-    job = await storage.get(token)
-    if job is None or not job.result:
-        await callback.answer("Ma'lumot eskirgan", show_alert=False)
-        await message.answer(texts.EXPIRED)
-        return
-    if job.chat_id != message.chat.id:
-        await callback.answer(texts.WRONG_CHAT, show_alert=True)
-        return
-
-    track = Track(**job.result)
+    token = job.token
     audio_title = f"{track.title}{variant.suffix}"
     caption = f"🎵 <b>{esc(audio_title)}</b>\n👤 {esc(track.artist)}"
+    keyboard = variant_keyboard(token, key)
 
     # 1) Avval yuborilgan bo'lsa - Telegram file_id orqali bir zumda qaytaramiz
     cached_id = job.audio_ids.get(key)
     if cached_id:
         try:
-            await message.answer_audio(cached_id, caption=caption)
-            await callback.answer("Tayyor ✅")
-            return
+            await message.answer_audio(
+                cached_id, caption=caption, reply_markup=keyboard
+            )
+            return True
         except TelegramAPIError as exc:
             log.info("Keshdagi audio yaroqsiz (%s), qaytadan tayyorlanadi", exc)
             job.audio_ids.pop(key, None)
 
     if token in _audio_busy:
-        await callback.answer(texts.AUDIO_BUSY, show_alert=True)
-        return
-    warning = security.rate_check(_search_limiter, user_id)
-    if warning:
-        await callback.answer(warning[:190], show_alert=True)
-        return
+        await message.answer(texts.AUDIO_BUSY)
+        return False
 
     work_dir = Path(job.work_dir)
     if not security.is_inside(work_dir, config.DOWNLOAD_DIR):
-        await callback.answer()
         await message.answer(texts.EXPIRED)
-        return
+        return False
 
     _audio_busy.add(token)
-    await callback.answer(f"{variant.label} tayyorlanmoqda...")
     status = await message.answer(texts.AUDIO_PREPARING.format(label=variant.label))
     try:
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -521,10 +500,9 @@ async def on_variant(callback: CallbackQuery) -> None:
             await safe_edit(status, texts.AUDIO_MAKING.format(label=variant.label))
             await variants.make_variant(song_path, out_path, variant)
 
-        size_mb = out_path.stat().st_size / (1024 * 1024)
-        if size_mb > config.MAX_UPLOAD_MB:
+        if out_path.stat().st_size / (1024 * 1024) > config.MAX_UPLOAD_MB:
             await safe_edit(status, texts.AUDIO_TOO_BIG)
-            return
+            return False
 
         await safe_edit(status, texts.AUDIO_SENDING)
         await message.bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_DOCUMENT)
@@ -543,12 +521,14 @@ async def on_variant(callback: CallbackQuery) -> None:
             title=audio_title[:64],
             performer=track.artist[:64],
             caption=caption,
+            reply_markup=keyboard,
             **kwargs,
         )
         if sent.audio:
             job.audio_ids[key] = sent.audio.file_id
             await storage.update(job)
         await safe_delete(status)
+        return True
 
     except DownloadError as exc:
         await safe_edit(status, f"❌ {esc(str(exc))}")
@@ -560,6 +540,49 @@ async def on_variant(callback: CallbackQuery) -> None:
         await safe_edit(status, texts.ERROR)
     finally:
         _audio_busy.discard(token)
+    return False
+
+
+@router.callback_query(F.data.startswith("v:"))
+async def on_variant(callback: CallbackQuery) -> None:
+    parts = (callback.data or "").split(":")
+    message = callback.message
+    if len(parts) != 3 or message is None:
+        await callback.answer()
+        return
+
+    _, token, key = parts
+    variant = variants.get(key)
+    if variant is None:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    if not security.is_allowed_user(user_id):
+        await callback.answer(texts.NOT_ALLOWED, show_alert=True)
+        return
+
+    job = await storage.get(token)
+    if job is None or not job.result:
+        await callback.answer("Ma'lumot eskirgan", show_alert=False)
+        await message.answer(texts.EXPIRED)
+        return
+    if job.chat_id != message.chat.id:
+        await callback.answer(texts.WRONG_CHAT, show_alert=True)
+        return
+
+    # Tayyor variant uchun cheklov qo'llanmaydi - u shunchaki keshdan keladi
+    if key not in job.audio_ids:
+        if token in _audio_busy:
+            await callback.answer(texts.AUDIO_BUSY, show_alert=True)
+            return
+        warning = security.rate_check(_search_limiter, user_id)
+        if warning:
+            await callback.answer(warning[:190], show_alert=True)
+            return
+
+    await callback.answer(f"{variant.label} tayyorlanmoqda...")
+    await deliver_variant(message, job, Track(**job.result), key)
 
 
 @router.message()
