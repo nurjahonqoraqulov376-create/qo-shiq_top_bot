@@ -6,7 +6,9 @@ import html
 import logging
 import re
 import shutil
+import signal
 import sys
+from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -438,13 +440,45 @@ async def main() -> None:
             ) from None
         log.info("Bot ishga tushdi: @%s", me.username)
         await bot.delete_webhook(drop_pending_updates=True)
+
+        # Server (Railway, VPS) to'xtatish signali yuborganda toza yopilamiz -
+        # aks holda Telegram bilan ulanish osilib qoladi va keyingi nusxa
+        # "conflict" xatosini oladi.
+        stop_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for signal_name in ("SIGTERM", "SIGINT"):
+            sig = getattr(signal, signal_name, None)
+            if sig is None:
+                continue
+            try:
+                loop.add_signal_handler(sig, stop_event.set)
+            except (NotImplementedError, RuntimeError, ValueError):
+                pass  # Windows'da qo'llab-quvvatlanmaydi - Ctrl+C ishlaydi
+
+        polling = asyncio.create_task(
+            dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        )
+        waiter = asyncio.create_task(stop_event.wait())
         try:
-            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+            done, _ = await asyncio.wait(
+                {polling, waiter}, return_when=asyncio.FIRST_COMPLETED
+            )
+            if polling in done:
+                polling.result()          # xato bo'lsa shu yerda ko'tariladi
+            else:
+                log.info("To'xtatish signali keldi, bot yopilmoqda...")
+                await dp.stop_polling()
+                with suppress(Exception):
+                    await polling
         except TelegramConflictError:
             raise SystemExit(
                 "Bu bot allaqachon boshqa joyda ishlab turibdi. Avvalgi nusxasini "
                 "to'xtating (bir vaqtda faqat bitta nusxa ishlashi mumkin)."
             ) from None
+        finally:
+            waiter.cancel()
+            with suppress(asyncio.CancelledError):
+                await waiter
     finally:
         cleaner.cancel()
         await asyncio.gather(cleaner, return_exceptions=True)

@@ -48,6 +48,22 @@ yoki shunchaki **`run.bat`** faylini ikki marta bosing.
 
 To'xtatish: `Ctrl + C`.
 
+## Serverda ishlatish (Railway)
+
+Bot Railway'da 24/7 ishlaydi — kompyuteringiz o'chiq bo'lsa ham.
+
+Loyihada tayyor sozlamalar bor:
+
+- `railway.json` — ishga tushirish buyrug'i (`python run.py`) va **bitta nusxa**
+  (`numReplicas: 1`);
+- `.python-version` — Python 3.12.
+
+**Muhim:** `BOT_TOKEN` va boshqa sozlamalar Railway'ning **Variables** bo'limida
+turadi, koddagi `.env` fayli serverga yuborilmaydi.
+
+⚠️ Bir vaqtda **faqat bitta nusxa** ishlashi mumkin. Server ishlab turganda
+botni kompyuterda ham ishga tushirsangiz, Telegram "conflict" xatosini beradi.
+
 ## Foydalanish
 
 1. Botga `/start` yuboring.
