@@ -2,7 +2,9 @@
 
 Instagram Reels, YouTube Shorts, TikTok va boshqa video havolalarini qabul qiladi,
 videoni yuklab beradi va uning ostidagi **🎵 Qo'shiqni top** tugmasi bosilganda
-videodagi qo'shiqni aniqlab beradi.
+videodagi qo'shiqni aniqlab beradi. So'ng qo'shiqni **6 xil variantda**
+yuklab olish mumkin: Original, Slowed, Slowed + Reverb, Speed Up, Nightcore,
+Bass Boost.
 
 ## Qanday ishlaydi
 
@@ -10,6 +12,7 @@ videodagi qo'shiqni aniqlab beradi.
 Havola  →  yt-dlp (video yuklash)  →  ffmpeg (audio ajratish)
         →  audio 5 ta joyidan kesiladi  →  Shazam bilan solishtiriladi
         →  natijalar ovoz berish (voting) usulida tekshiriladi  →  javob
+        →  tanlangan variant (slowed / reverb / nightcore ...) mp3 bo'lib yuboriladi
 ```
 
 Aniqlik uchun video **bitta emas, bir necha bo'lagidan** qidiriladi
@@ -70,10 +73,21 @@ botni kompyuterda ham ishga tushirsangiz, Telegram "conflict" xatosini beradi.
 2. Video havolasini tashlang, masalan:
    `https://www.instagram.com/reel/XXXXXXXX/`
 3. Bot videoni yuboradi, ostida **🎵 Qo'shiqni top** tugmasi chiqadi.
-4. Tugmani bosing — qo'shiq nomi, ijrochisi, albomi, muqovasi va
-   YouTube / Spotify / Shazam / Apple Music havolalari keladi.
+4. Tugmani bosing — qo'shiq nomi, ijrochisi, albomi va muqovasi keladi.
+5. Variant tugmasini bosing — qo'shiq mp3 fayl bo'lib keladi:
 
-Bir marta topilgan natija keshlanadi — tugma qayta bosilsa javob bir zumda keladi.
+| Tugma | Nima qiladi |
+|---|---|
+| 🎧 Original | O'zgartirilmagan |
+| 🐌 Slowed | Sekinlashtirilgan (0.86x) |
+| 🌊 Slowed + Reverb | Sekin + aks-sado |
+| ⚡ Speed Up | Tezlashtirilgan (1.22x) |
+| 🌙 Nightcore | Juda tez, yupqa ovoz |
+| 🔊 Bass Boost | Bass kuchaytirilgan |
+
+Birinchi variant ~15 soniya oladi (qo'shiq yuklanadi), keyingilari ~3 soniya.
+Bir marta yuborilgan variant Telegram `file_id` bilan keshlanadi — qayta
+bosilsa bir zumda keladi.
 
 ## Sozlamalar (`.env`)
 
@@ -90,6 +104,8 @@ Bir marta topilgan natija keshlanadi — tugma qayta bosilsa javob bir zumda kel
 | `MAX_DURATION_MIN` | Videoning maksimal uzunligi (daqiqa) | `30` |
 | `MAX_CONCURRENT_RECOGNITIONS` | Shazam'ga parallel so'rovlar soni | `2` |
 | `MAX_FILESIZE_MB` | Diskka yuklashning eng katta hajmi | `200` |
+| `SONG_MAX_MB` | Qo'shiq audiosining eng katta hajmi | `60` |
+| `SONG_MAX_MIN` | Qo'shiqning eng katta uzunligi (daqiqa) | `12` |
 | `ALLOWED_USERS` | Yopiq rejim: ruxsat etilgan Telegram ID'lar | bo'sh (hamma) |
 | `ADMIN_USERS` | Cheklovlarsiz ishlaydigan egalar | bo'sh |
 | `RATE_LIMIT_PER_HOUR` | Bir foydalanuvchi uchun soatlik limit | `20` |
@@ -125,6 +141,7 @@ Shazam topa olmagan holatda avtomatik ishlaydi.
 | `app/downloader.py` | yt-dlp orqali video yuklash |
 | `app/audio.py` | ffmpeg: audio ajratish va bo'laklarga kesish |
 | `app/recognizer.py` | Shazam + ACRCloud orqali qo'shiqni aniqlash |
+| `app/variants.py` | Slowed / Reverb / Nightcore / Bass effektlari |
 | `app/storage.py` | Tugmalar uchun ma'lumot saqlash va tozalash |
 | `app/ffmpeg_setup.py` | ffmpeg ni avtomatik tayyorlash |
 | `app/security.py` | Xavfsizlik: havola tekshiruvi, limitlar, yo'l nazorati |

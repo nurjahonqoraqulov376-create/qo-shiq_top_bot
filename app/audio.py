@@ -19,7 +19,8 @@ class AudioError(RuntimeError):
     pass
 
 
-async def _run(args: list[str], timeout: int = 180) -> None:
+async def run_ffmpeg(args: list[str], timeout: int = 180) -> None:
+    """ffmpeg ni shell'siz (xavfsiz) ishga tushiradi."""
     proc = await asyncio.create_subprocess_exec(
         *args,
         stdout=asyncio.subprocess.DEVNULL,
@@ -40,7 +41,7 @@ async def extract_audio(video_path: Path, out_path: Path) -> Path:
     """Videodan to'liq audio yo'lakchani WAV (16 kHz, mono) sifatida ajratadi."""
     ffmpeg = ensure_ffmpeg()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    await _run([
+    await run_ffmpeg([
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-i", str(video_path),
         "-vn", "-sn", "-dn",
@@ -65,7 +66,7 @@ def wav_duration(path: Path) -> float:
 async def cut_clip(src_wav: Path, out_path: Path, start: float, length: float) -> Path:
     """WAV dan `start` soniyadan boshlab `length` soniyalik bo'lak kesadi."""
     ffmpeg = ensure_ffmpeg()
-    await _run([
+    await run_ffmpeg([
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-ss", f"{max(0.0, start):.2f}",
         "-t", f"{length:.2f}",
@@ -101,7 +102,7 @@ async def ensure_mp4(video_path: Path) -> Path:
     )
     for args, timeout in attempts:
         try:
-            await _run(args, timeout=timeout)
+            await run_ffmpeg(args, timeout=timeout)
         except AudioError as exc:
             log.info("mp4 ga o'tkazish urinishi muvaffaqiyatsiz: %s", exc)
             out_path.unlink(missing_ok=True)

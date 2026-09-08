@@ -13,6 +13,8 @@ from dataclasses import asdict
 from pathlib import Path
 from urllib.parse import quote_plus
 
+import aiohttp
+
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -33,9 +35,9 @@ from aiogram.types import (
     URLInputFile,
 )
 
-from . import config, security, storage, texts
+from . import config, security, storage, texts, variants
 from .audio import AudioError, ensure_mp4, extract_audio, wav_duration
-from .downloader import DownloadError, Video, download, find_url
+from .downloader import DownloadError, Video, download, download_song, find_url
 from .ffmpeg_setup import ensure_ffmpeg
 from .recognizer import Track, identify
 from .security import RateLimiter, safe_link
@@ -51,6 +53,7 @@ router = Router()
 _download_sem = asyncio.Semaphore(config.MAX_CONCURRENT_DOWNLOADS)
 _busy_users: set[int] = set()
 _searching: set[str] = set()
+_audio_busy: set[str] = set()
 
 # Qidiruv tugmasi uchun alohida, yumshoqroq cheklov (yuklashsiz, arzonroq amal)
 _search_limiter = RateLimiter(config.RATE_LIMIT_PER_HOUR * 2, cooldown=3)
@@ -74,18 +77,31 @@ def result_keyboard(track: Track, token: str) -> InlineKeyboardMarkup:
     query = quote_plus(f"{track.artist} {track.title}".strip()[:200])
     rows: list[list[InlineKeyboardButton]] = []
 
-    # Tashqi havolalar tekshiriladi: faqat http(s) qabul qilinadi
-    first: list[InlineKeyboardButton] = []
+    # 1) Audio variantlari - asosiy imkoniyat
+    for row in variants.KEYBOARD_ROWS:
+        buttons = [
+            InlineKeyboardButton(
+                text=variants.VARIANTS[key].label,
+                callback_data=f"v:{token}:{key}",
+            )
+            for key in row
+            if key in variants.VARIANTS
+        ]
+        if buttons:
+            rows.append(buttons)
+
+    # 2) Tashqi havolalar (faqat http(s) qabul qilinadi)
+    links: list[InlineKeyboardButton] = []
     shazam_url = safe_link(track.url)
     if shazam_url:
-        first.append(InlineKeyboardButton(text="🔎 Shazam", url=shazam_url))
+        links.append(InlineKeyboardButton(text="🔎 Shazam", url=shazam_url))
     apple = safe_link(
         track.listen_links.get("Apple Music") or track.listen_links.get("Applemusic")
     )
     if apple:
-        first.append(InlineKeyboardButton(text="🍏 Apple Music", url=apple))
-    if first:
-        rows.append(first)
+        links.append(InlineKeyboardButton(text="🍏 Apple Music", url=apple))
+    if links:
+        rows.append(links)
 
     rows.append([
         InlineKeyboardButton(
@@ -93,34 +109,29 @@ def result_keyboard(track: Track, token: str) -> InlineKeyboardMarkup:
             url=f"https://www.youtube.com/results?search_query={query}",
         ),
         InlineKeyboardButton(
-            text="🎧 Spotify",
+            text="🟢 Spotify",
             url=f"https://open.spotify.com/search/{query}",
         ),
-    ])
-    rows.append([
-        InlineKeyboardButton(text="🔄 Qaytadan qidirish", callback_data=f"song:{token}")
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def format_track(track: Track) -> str:
     lines = [
-        "✅ <b>Qo'shiq topildi!</b>",
-        "",
-        f"🎵 <b>Nomi:</b> {esc(track.title)}",
-        f"👤 <b>Ijrochi:</b> {esc(track.artist)}",
+        f"🎵 <b>{esc(track.title)}</b>",
+        f"👤 {esc(track.artist)}",
     ]
-    if track.album:
-        lines.append(f"💿 <b>Albom:</b> {esc(track.album)}")
-    if track.released:
-        lines.append(f"📅 <b>Chiqqan yili:</b> {esc(track.released)}")
-    if track.genre:
-        lines.append(f"🎼 <b>Janr:</b> {esc(track.genre)}")
+
+    details = [esc(x) for x in (track.album, track.released, track.genre) if x]
+    if details:
+        lines.append("💿 " + " · ".join(details))
+
     lines += [
         "",
-        f"📊 <b>Ishonchlilik:</b> {track.confidence} "
+        f"📊 Ishonchlilik: <b>{track.confidence}</b> "
         f"({track.hits}/{max(track.attempts, track.hits)} moslik)",
-        f"🔍 <i>Manba: {esc(track.source)}</i>",
+        "",
+        "👇 <b>Variantni tanlang:</b>",
     ]
     return "\n".join(lines)
 
@@ -378,6 +389,177 @@ async def on_find_song(callback: CallbackQuery) -> None:
     job.not_found = False
     await storage.update(job)
     await send_result(message, track, token)
+
+
+# --------------------------------------------------------------------------- #
+# Audio variantlari: Original / Slowed / Reverb / Speed Up / Nightcore / Bass
+# --------------------------------------------------------------------------- #
+def safe_filename(name: str) -> str:
+    """Fayl nomidan xavfli belgilarni olib tashlaydi."""
+    cleaned = "".join(ch for ch in name if ch not in '\\/:*?"<>|\n\r\t')
+    cleaned = " ".join(cleaned.split()).strip(". ")
+    return cleaned[:80] or "audio"
+
+
+async def fetch_cover(url: str, work_dir: Path) -> Path | None:
+    """Muqovani yuklab, Telegram uchun 320x320 JPEG ga aylantiradi."""
+    link = safe_link(url)
+    if not link:
+        return None
+    try:
+        await security.validate_url(link)
+    except security.SecurityError:
+        return None
+
+    raw = work_dir / "cover_raw"
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(link) as response:
+                if response.status != 200:
+                    return None
+                data = await response.content.read(5 * 1024 * 1024)
+        if not data:
+            return None
+        raw.write_bytes(data)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Muqova yuklanmadi: %s", exc)
+        return None
+
+    thumb = await variants.prepare_thumbnail(raw, work_dir / "cover.jpg")
+    raw.unlink(missing_ok=True)
+    return thumb
+
+
+@router.callback_query(F.data.startswith("v:"))
+async def on_variant(callback: CallbackQuery) -> None:
+    parts = (callback.data or "").split(":")
+    message = callback.message
+    if len(parts) != 3 or message is None:
+        await callback.answer()
+        return
+
+    _, token, key = parts
+    variant = variants.get(key)
+    if variant is None:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    if not security.is_allowed_user(user_id):
+        await callback.answer(texts.NOT_ALLOWED, show_alert=True)
+        return
+
+    job = await storage.get(token)
+    if job is None or not job.result:
+        await callback.answer("Ma'lumot eskirgan", show_alert=False)
+        await message.answer(texts.EXPIRED)
+        return
+    if job.chat_id != message.chat.id:
+        await callback.answer(texts.WRONG_CHAT, show_alert=True)
+        return
+
+    track = Track(**job.result)
+    audio_title = f"{track.title}{variant.suffix}"
+    caption = f"🎵 <b>{esc(audio_title)}</b>\n👤 {esc(track.artist)}"
+
+    # 1) Avval yuborilgan bo'lsa - Telegram file_id orqali bir zumda qaytaramiz
+    cached_id = job.audio_ids.get(key)
+    if cached_id:
+        try:
+            await message.answer_audio(cached_id, caption=caption)
+            await callback.answer("Tayyor ✅")
+            return
+        except TelegramAPIError as exc:
+            log.info("Keshdagi audio yaroqsiz (%s), qaytadan tayyorlanadi", exc)
+            job.audio_ids.pop(key, None)
+
+    if token in _audio_busy:
+        await callback.answer(texts.AUDIO_BUSY, show_alert=True)
+        return
+    warning = security.rate_check(_search_limiter, user_id)
+    if warning:
+        await callback.answer(warning[:190], show_alert=True)
+        return
+
+    work_dir = Path(job.work_dir)
+    if not security.is_inside(work_dir, config.DOWNLOAD_DIR):
+        await callback.answer()
+        await message.answer(texts.EXPIRED)
+        return
+
+    _audio_busy.add(token)
+    await callback.answer(f"{variant.label} tayyorlanmoqda...")
+    status = await message.answer(texts.AUDIO_PREPARING.format(label=variant.label))
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        # 2) Qo'shiqning to'liq audiosi (bir marta yuklanadi, keyin keshdan)
+        song_path = Path(job.song_path) if job.song_path else None
+        if song_path is None or not song_path.exists():
+            await safe_edit(status, texts.AUDIO_SEARCHING)
+            async with _download_sem:
+                song = await download_song(
+                    f"{track.artist} {track.title}", work_dir=work_dir
+                )
+            job.song_path = str(song.path)
+            job.song_duration = song.duration
+            await storage.update(job)
+            song_path = song.path
+
+        # 3) Muqova (ixtiyoriy - bo'lmasa ham audio yuboriladi)
+        thumb = Path(job.thumb_path) if job.thumb_path else None
+        if (thumb is None or not thumb.exists()) and track.cover:
+            thumb = await fetch_cover(track.cover, work_dir)
+            if thumb:
+                job.thumb_path = str(thumb)
+                await storage.update(job)
+
+        # 4) Variantni tayyorlaymiz (tayyor bo'lsa - qayta ishlamaymiz)
+        out_path = work_dir / f"variant_{key}.mp3"
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            await safe_edit(status, texts.AUDIO_MAKING.format(label=variant.label))
+            await variants.make_variant(song_path, out_path, variant)
+
+        size_mb = out_path.stat().st_size / (1024 * 1024)
+        if size_mb > config.MAX_UPLOAD_MB:
+            await safe_edit(status, texts.AUDIO_TOO_BIG)
+            return
+
+        await safe_edit(status, texts.AUDIO_SENDING)
+        await message.bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_DOCUMENT)
+
+        kwargs: dict = {}
+        if job.song_duration:
+            kwargs["duration"] = max(1, int(job.song_duration / variant.speed))
+        if thumb and thumb.exists():
+            kwargs["thumbnail"] = FSInputFile(thumb)
+
+        sent = await message.answer_audio(
+            FSInputFile(
+                out_path,
+                filename=safe_filename(f"{track.artist} - {audio_title}") + ".mp3",
+            ),
+            title=audio_title[:64],
+            performer=track.artist[:64],
+            caption=caption,
+            **kwargs,
+        )
+        if sent.audio:
+            job.audio_ids[key] = sent.audio.file_id
+            await storage.update(job)
+        await safe_delete(status)
+
+    except DownloadError as exc:
+        await safe_edit(status, f"❌ {esc(str(exc))}")
+    except AudioError as exc:
+        log.warning("Variant tayyorlanmadi: %s", exc)
+        await safe_edit(status, texts.AUDIO_FAILED)
+    except Exception:  # noqa: BLE001
+        log.exception("Audio variantida kutilmagan xato")
+        await safe_edit(status, texts.ERROR)
+    finally:
+        _audio_busy.discard(token)
 
 
 @router.message()

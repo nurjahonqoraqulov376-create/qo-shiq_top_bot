@@ -20,6 +20,8 @@ from .config import (
     MAX_DURATION_MIN,
     MAX_FILESIZE_MB,
     MAX_VIDEO_HEIGHT,
+    SONG_MAX_MB,
+    SONG_MAX_MIN,
 )
 from .ffmpeg_setup import ffmpeg_dir
 from .security import SecurityError, validate_url
@@ -252,6 +254,128 @@ def _download_sync(url: str, work_dir: Path, cookies: tuple[str, str | None]) ->
         webpage_url=info.get("webpage_url") or url,
         thumbnail=info.get("thumbnail"),
     )
+
+
+@dataclass(slots=True)
+class Song:
+    """Topilgan qo'shiqning to'liq audiosi."""
+
+    path: Path
+    title: str
+    duration: float
+    webpage_url: str
+
+
+def _song_opts(work_dir: Path, cookies: tuple[str, str | None]) -> dict:
+    """Qo'shiq audiosini qidirib yuklash uchun sozlamalar."""
+    opts = _ydl_opts(work_dir, cookies)
+    opts.update({
+        "outtmpl": str(work_dir / "song.%(ext)s"),
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        "default_search": "ytsearch1",
+        "max_filesize": SONG_MAX_MB * 1024 * 1024,
+        "noplaylist": True,
+    })
+    opts.pop("merge_output_format", None)
+    return opts
+
+
+def _download_song_sync(query: str, work_dir: Path, cookies: tuple[str, str | None]) -> Song:
+    deadline = time.monotonic() + DOWNLOAD_TIMEOUT
+
+    def deadline_hook(status: dict) -> None:
+        if time.monotonic() > deadline:
+            raise _Abort("Qo'shiqni yuklash juda uzoq davom etdi.")
+
+    def duration_filter(info: dict, *, incomplete: bool = False) -> str | None:
+        duration = info.get("duration")
+        # Juda uzun natijalar odatda "mix"/"album" bo'ladi - ularni o'tkazamiz
+        if duration and duration > SONG_MAX_MIN * 60:
+            return "juda uzun"
+        return None
+
+    opts = _song_opts(work_dir, cookies)
+    opts["progress_hooks"] = [deadline_hook]
+    opts["match_filter"] = duration_filter
+
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(query, download=True)
+    except _Abort as exc:
+        raise DownloadError(exc.reason) from exc
+
+    if info is None:
+        raise DownloadError("Bu qo'shiqning audiosi topilmadi.")
+    if info.get("_type") in ("playlist", "compat_list"):
+        entries = [e for e in (info.get("entries") or []) if e]
+        if not entries:
+            raise DownloadError("Bu qo'shiqning audiosi topilmadi.")
+        info = entries[0]
+
+    path: Path | None = None
+    for downloaded in info.get("requested_downloads") or []:
+        candidate = downloaded.get("filepath")
+        if candidate and Path(candidate).exists():
+            path = Path(candidate)
+            break
+    if path is None:
+        files = sorted(work_dir.glob("song.*"), key=lambda p: p.stat().st_size, reverse=True)
+        if files:
+            path = files[0]
+    if path is None or not path.exists():
+        raise DownloadError("Qo'shiq fayli yuklanmadi.")
+
+    return Song(
+        path=path,
+        title=(info.get("title") or "").strip(),
+        duration=float(info.get("duration") or 0.0),
+        webpage_url=info.get("webpage_url") or "",
+    )
+
+
+async def download_song(query: str, work_dir: Path | None = None) -> Song:
+    """Qo'shiq nomi bo'yicha YouTube'dan to'liq audiosini yuklaydi.
+
+    `query` - foydalanuvchi havolasi emas, balki Shazam qaytargan
+    "ijrochi - nom" matni, shuning uchun u qidiruv so'rovi sifatida ishlatiladi.
+
+    `work_dir` berilsa, fayl o'sha papkaga tushadi va xato bo'lganda papka
+    o'chirilmaydi (unda chaqiruvchining boshqa fayllari bo'lishi mumkin).
+    """
+    clean = " ".join((query or "").split())[:150]
+    if not clean:
+        raise DownloadError("Qo'shiq nomi bo'sh.")
+
+    owns_dir = work_dir is None
+    loop = asyncio.get_running_loop()
+    plan = _cookie_plan()
+    last_error = "Qo'shiq audiosini topib bo'lmadi."
+
+    for index, cookies in enumerate(plan):
+        if owns_dir:
+            target = DOWNLOAD_DIR / f"song_{uuid.uuid4().hex[:12]}"
+        else:
+            target = work_dir  # type: ignore[assignment]
+        target.mkdir(parents=True, exist_ok=True)
+        try:
+            return await loop.run_in_executor(
+                None, _download_song_sync, f"ytsearch1:{clean}", target, cookies
+            )
+        except DownloadError:
+            if owns_dir:
+                shutil.rmtree(target, ignore_errors=True)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if owns_dir:
+                shutil.rmtree(target, ignore_errors=True)
+            raw = str(exc)
+            log.warning("Qo'shiq yuklanmadi (%s): %s", cookies[0], raw)
+            last_error = raw
+            if index + 1 < len(plan) and _needs_cookies(raw):
+                continue
+            break
+
+    raise DownloadError(_friendly_error(last_error))
 
 
 async def download(url: str) -> Video:

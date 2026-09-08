@@ -8,8 +8,11 @@ START = (
     "Men:\n"
     "1️⃣ videoni yuklab beraman;\n"
     "2️⃣ uning ostida <b>🎵 Qo'shiqni top</b> tugmasi chiqadi;\n"
-    "3️⃣ tugmani bosing — videodagi qo'shiq nomi, ijrochisi va tinglash "
-    "havolalarini aniq topib beraman.\n\n"
+    "3️⃣ tugmani bossangiz — qo'shiq nomi, ijrochisi va muqovasini topaman;\n"
+    "4️⃣ so'ng qo'shiqni <b>istalgan variantda</b> yuklab olasiz:\n\n"
+    "🎧 Original     🐌 Slowed\n"
+    "🌊 Slowed + Reverb     ⚡ Speed Up\n"
+    "🌙 Nightcore     🔊 Bass Boost\n\n"
     "👇 Hoziroq havola yuboring."
 )
 
@@ -21,6 +24,14 @@ HELP = (
     "<code>https://youtube.com/shorts/XXXXXXXXX</code>\n\n"
     "<b>Qo'llab-quvvatlanadi:</b> Instagram, YouTube, TikTok, Facebook, "
     "Pinterest, Twitter (X) va boshqa ko'plab saytlar.\n\n"
+    "<b>Variantlar nima?</b>\n"
+    "Qo'shiq topilgach, uni turli ko'rinishda yuklab olasiz:\n"
+    "• <b>🐌 Slowed</b> — sekinlashtirilgan;\n"
+    "• <b>🌊 Slowed + Reverb</b> — sekin va aks-sadoli (eng mashhuri);\n"
+    "• <b>⚡ Speed Up</b> — tezlashtirilgan;\n"
+    "• <b>🌙 Nightcore</b> — juda tez va yupqa ovoz;\n"
+    "• <b>🔊 Bass Boost</b> — bass kuchaytirilgan.\n"
+    "Birinchi variant biroz kutdiradi, keyingilari tez chiqadi.\n\n"
     "<b>Qo'shiq topilmasa nima qilay?</b>\n"
     "• Videoda musiqa juda past yoki faqat gap bo'lsa, topilmasligi mumkin.\n"
     "• Qayta urinish tugmasini bosib ko'ring.\n\n"
@@ -79,3 +90,16 @@ DISK_BUSY = (
 )
 
 WRONG_CHAT = "⚠️ Bu tugma boshqa suhbatga tegishli."
+
+# --------------------------------------------------------------------------- #
+# Audio variantlari
+# --------------------------------------------------------------------------- #
+AUDIO_PREPARING = "⏳ {label} tayyorlanmoqda..."
+AUDIO_SEARCHING = "🔎 Qo'shiq audiosi qidirilmoqda..."
+AUDIO_MAKING = "🎛 {label} qilinmoqda..."
+AUDIO_SENDING = "📤 Yuborilmoqda..."
+AUDIO_BUSY = "⏳ Oldingi variant hali tayyor bo'lmadi. Biroz kuting."
+AUDIO_FAILED = "❌ Audio variantini tayyorlab bo'lmadi. Qayta urinib ko'ring."
+AUDIO_TOO_BIG = (
+    "⚠️ Bu qo'shiq juda uzun — audio fayl Telegram chegarasidan katta chiqdi."
+)

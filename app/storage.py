@@ -37,6 +37,11 @@ class Job:
     created_at: float = field(default_factory=time.time)
     result: dict | None = None          # topilgan qo'shiq (keshlanadi)
     not_found: bool = False             # qidirildi, lekin topilmadi
+    song_path: str | None = None        # qo'shiqning to'liq audiosi
+    song_duration: float = 0.0
+    thumb_path: str | None = None       # muqova (Telegram uchun 320x320)
+    # variant kaliti -> Telegram file_id (qayta yuborishda tez ishlaydi)
+    audio_ids: dict = field(default_factory=dict)
 
     @property
     def expired(self) -> bool:
@@ -106,6 +111,12 @@ def load() -> None:
             continue
         if job.audio_path and not is_inside(job.audio_path, DOWNLOAD_DIR):
             job.audio_path = None
+        if job.song_path and not is_inside(job.song_path, DOWNLOAD_DIR):
+            job.song_path = None
+        if job.thumb_path and not is_inside(job.thumb_path, DOWNLOAD_DIR):
+            job.thumb_path = None
+        if not isinstance(job.audio_ids, dict):
+            job.audio_ids = {}
         _jobs[token] = job
     log.info("%d ta eski yozuv tiklandi", len(_jobs))
 

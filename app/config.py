@@ -77,6 +77,10 @@ MAX_CONCURRENT_DOWNLOADS = _int("MAX_CONCURRENT_DOWNLOADS", 3, 1, 20)
 DOWNLOAD_TIMEOUT = _int("DOWNLOAD_TIMEOUT", 300, 30, 3600)
 MAX_DURATION_MIN = _int("MAX_DURATION_MIN", 30, 1, 600)
 
+# Qo'shiq audiosini yuklash chegaralari (slowed/reverb variantlari uchun)
+SONG_MAX_MB = _int("SONG_MAX_MB", 60, 5, 300)
+SONG_MAX_MIN = _int("SONG_MAX_MIN", 12, 1, 60)
+
 # Shazam'ga bir vaqtda nechta so'rov yuborilsin (IP bloklanmasligi uchun)
 MAX_CONCURRENT_RECOGNITIONS = _int("MAX_CONCURRENT_RECOGNITIONS", 2, 1, 10)
 
