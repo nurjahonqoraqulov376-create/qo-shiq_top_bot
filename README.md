@@ -1,7 +1,7 @@
 # 🎵 Qo'shiq izlovchi — Telegram bot
 
 Instagram Reels, YouTube Shorts, TikTok va boshqa video havolalarini qabul qiladi,
-videoni yuklab beradi va uning ostidagi **🎵 Qo'shiqni top** tugmasi bosilganda
+videoni yuklab beradi va uning ostidagi **📥 Qo'shiqni yuklab olish** tugmasi bosilganda
 videodagi qo'shiqni aniqlab, **audiosini o'zi yuboradi**. Audio ostidagi
 tugmalar orqali uning **Slowed**, **Slowed + Reverb** va **Speed Up**
 variantlarini ham olish mumkin.
@@ -72,7 +72,7 @@ botni kompyuterda ham ishga tushirsangiz, Telegram "conflict" xatosini beradi.
 1. Botga `/start` yuboring.
 2. Video havolasini tashlang, masalan:
    `https://www.instagram.com/reel/XXXXXXXX/`
-3. Bot videoni yuboradi, ostida **🎵 Qo'shiqni top** tugmasi chiqadi.
+3. Bot videoni yuboradi, ostida **📥 Qo'shiqni yuklab olish** tugmasi chiqadi.
 4. **📥 Qo'shiqni yuklab olish** tugmasini bosing — bot qo'shiqni topib,
    **mp3 audiosini o'zi yuboradi** (nomi, ijrochisi va muqovasi bilan).
 5. Audio ostidagi tugmalar bilan boshqa variantlarini olasiz:
@@ -110,19 +110,47 @@ bosilsa bir zumda keladi.
 | `RATE_LIMIT_PER_HOUR` | Bir foydalanuvchi uchun soatlik limit | `20` |
 | `RATE_LIMIT_COOLDOWN` | So'rovlar orasidagi pauza (soniya) | `5` |
 | `MAX_DISK_MB` | Vaqtinchalik fayllar uchun eng katta joy | `2048` |
-| `COOKIES_FROM_BROWSER` | `auto` / `chrome` / `edge` / `firefox` — Instagram uchun | bo'sh |
+| `COOKIES_FROM_BROWSER` | `auto` / `chrome` / `edge` / `firefox` (kompyuterda) | bo'sh |
+| `COOKIES_B64` | Serverda cookie'lar (base64 qilingan cookies.txt) | bo'sh |
 | `ACR_*` | Ixtiyoriy ACRCloud zaxira xizmati | bo'sh |
 
-## Instagram "login talab qilinyapti" desa
+## "Login talab qilinyapti" yoki "yosh cheklovi" desa
 
-Instagram ba'zan mehmon (login qilmagan) so'rovlarni bloklaydi. Yechim:
+Ba'zi videolarni sayt faqat tizimga kirgan foydalanuvchilarga beradi:
 
-1. `.env` da `COOKIES_FROM_BROWSER=auto` deb yozing — bot avval cookie'siz
-   urinadi, bloklansa Chrome → Edge → Firefox cookie'lari bilan qayta uradi
-   (brauzeringizda Instagram'ga kirgan bo'lishingiz va brauzer yopiq turishi
-   kerak), **yoki**
-2. brauzerdan `cookies.txt` (Netscape formatida) eksport qilib, loyiha
-   papkasiga qo'ying.
+- **YouTube 18+ videolari** — `Sign in to confirm your age`;
+- **Instagram** ba'zan mehmon so'rovlarini bloklaydi.
+
+Bu holatlarni **faqat cookie'lar** hal qiladi (2026-yil holatiga ko'ra
+`player_client` bilan chetlab o'tish usullari YouTube tomonidan yopilgan —
+sinab ko'rilgan).
+
+### Kompyuterda ishlatilsa
+
+`.env` da `COOKIES_FROM_BROWSER=auto` deb yozing — bot avval cookie'siz
+urinadi, bloklansa Chrome → Edge → Firefox cookie'lari bilan qayta uradi
+(brauzer yopiq turishi kerak). Yoki `cookies.txt` ni loyiha papkasiga qo'ying.
+
+### Serverda (Railway) ishlatilsa
+
+Serverda brauzer yo'q, shuning uchun cookie'lar sozlama orqali beriladi:
+
+1. Brauzerga **"Get cookies.txt LOCALLY"** kengaytmasini o'rnating,
+   kerakli saytga (YouTube/Instagram) kirgan holda `cookies.txt` ni eksport qiling.
+2. Faylni base64 ga o'giring:
+
+   ```powershell
+   [Convert]::ToBase64String([IO.File]::ReadAllBytes("cookies.txt")) | Set-Clipboard
+   ```
+
+3. Railway'da `COOKIES_B64` o'zgaruvchisini yarating va qiymatni qo'ying.
+   (`COOKIES_TXT` orqali faylning o'zini ko'p qatorli qiymat sifatida ham
+   berish mumkin.)
+
+> ⚠️ **Ehtiyot bo'ling:** cookies.txt — bu sizning akkauntingizga kirish
+> kaliti. Uni hech kimga bermang va **asosiy akkauntingiz o'rniga zaxira
+> akkaunt** ishlatganingiz ma'qul: bunday faylni serverga qo'yish akkaunt
+> bloklanishiga ham olib kelishi mumkin.
 
 ## Aniqlikni yanada oshirish (ixtiyoriy)
 

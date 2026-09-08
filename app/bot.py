@@ -201,7 +201,7 @@ async def on_link(message: Message) -> None:
             if wav_duration(wav) >= 1.0:
                 job.audio_path = str(wav)
         except AudioError as exc:
-            log.info("Audio ajratilmadi: %s", exc)
+            log.info("Audio ajratilmadi (%s): %s", video.webpage_url, exc)
         except Exception:  # noqa: BLE001
             log.exception("Audio ajratishda kutilmagan xato")
 

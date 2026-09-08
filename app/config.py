@@ -6,6 +6,8 @@ ushlab turiladi.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import os
 from pathlib import Path
@@ -55,6 +57,47 @@ BIN_DIR = DATA_DIR / "bin"
 COOKIES_FILE = Path(os.getenv("COOKIES_FILE") or (BASE_DIR / "cookies.txt"))
 # Masalan: chrome | edge | firefox | auto  (Instagram login talab qilsa foydali)
 COOKIES_FROM_BROWSER: str = os.getenv("COOKIES_FROM_BROWSER", "").strip()
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _materialize_cookies() -> Path | None:
+    """Serverda cookie'larni muhit o'zgaruvchisidan faylga yozadi.
+
+    Railway/VPS'da brauzer yo'q, shuning uchun cookies.txt ni to'g'ridan-to'g'ri
+    sozlamaga joylash kerak bo'ladi:
+      * COOKIES_B64 - base64 ga o'girilgan cookies.txt (tavsiya etiladi);
+      * COOKIES_TXT - cookies.txt ning o'zi (ko'p qatorli qiymat).
+    """
+    encoded = os.getenv("COOKIES_B64", "").strip()
+    plain = os.getenv("COOKIES_TXT", "")
+    data: bytes | None = None
+
+    if encoded:
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            log.warning("COOKIES_B64 base64 emas - e'tiborsiz qoldirildi")
+    elif plain.strip():
+        data = plain.encode("utf-8")
+
+    if not data:
+        return None
+
+    path = DATA_DIR / "cookies_env.txt"
+    try:
+        path.write_bytes(data)
+        path.chmod(0o600)
+    except OSError as exc:
+        log.warning("Cookie fayli yozilmadi: %s", exc)
+        return None
+    log.info("Cookie'lar sozlamadan o'qildi (%d bayt)", len(data))
+    return path
+
+
+_ENV_COOKIES = _materialize_cookies()
+if _ENV_COOKIES is not None and not COOKIES_FILE.exists():
+    COOKIES_FILE = _ENV_COOKIES
 
 # Telegram bot API orqali yuborish chegarasi (50 MB), biroz zaxira qoldiramiz
 MAX_UPLOAD_MB = _int("MAX_UPLOAD_MB", 48, 1, 49)

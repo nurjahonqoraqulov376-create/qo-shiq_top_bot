@@ -156,16 +156,42 @@ def _ydl_opts(work_dir: Path, cookies: tuple[str, str | None] = ("none", None)) 
     return opts
 
 
+def _is_age_gated(message: str) -> bool:
+    low = message.lower()
+    return "confirm your age" in low or "age-restricted" in low
+
+
+def admin_hint(message: str) -> str | None:
+    """Bot egasi uchun maslahat (foydalanuvchiga emas, log'ga yoziladi)."""
+    if _is_age_gated(message):
+        return (
+            "Yosh cheklovi: buni faqat 18+ akkaunt cookie'lari hal qiladi. "
+            "cookies.txt ni COOKIES_B64 sozlamasiga joylang."
+        )
+    if _needs_cookies(message):
+        return (
+            "Sayt login talab qilyapti. Serverda COOKIES_B64, kompyuterda esa "
+            "COOKIES_FROM_BROWSER=auto sozlamasidan foydalaning."
+        )
+    return None
+
+
 def _friendly_error(message: str) -> str:
     low = message.lower()
+    # Foydalanuvchiga faqat tushunarli xabar beriladi - texnik maslahatlar log'da
+    if _is_age_gated(low):
+        return (
+            "🔞 Bu videoda yosh cheklovi bor. YouTube uni faqat tizimga kirgan "
+            "foydalanuvchilarga ko'rsatadi, shuning uchun yuklab bo'lmaydi.\n"
+            "Boshqa havola yuborib ko'ring."
+        )
     if "private" in low or "unavailable" in low or "has been removed" in low:
         return "Bu post yopiq (private) yoki o'chirilgan — video yuklab bo'lmadi."
     if _needs_cookies(low):
         return (
-            "Sayt bu videoni ko'rsatish uchun akkauntga kirishni (cookies) talab qilyapti.\n"
-            "Yechim: .env faylida COOKIES_FROM_BROWSER=auto deb yozib, botni qayta "
-            "ishga tushiring (brauzeringizda o'sha saytga kirgan bo'lishingiz kerak).\n"
-            "Agar post yopiq bo'lsa, ochiq havola yuboring."
+            "🔒 Sayt bu videoni faqat tizimga kirgan foydalanuvchilarga ko'rsatyapti, "
+            "shuning uchun yuklab bo'lmadi.\n"
+            "Ochiq (hammaga ko'rinadigan) havola yuboring."
         )
     if "max-filesize" in low or "larger than" in low:
         return (
@@ -370,6 +396,9 @@ async def download_song(query: str, work_dir: Path | None = None) -> Song:
                 shutil.rmtree(target, ignore_errors=True)
             raw = str(exc)
             log.warning("Qo'shiq yuklanmadi (%s): %s", cookies[0], raw)
+            hint = admin_hint(raw)
+            if hint:
+                log.warning("Bot egasiga maslahat: %s", hint)
             last_error = raw
             if index + 1 < len(plan) and _needs_cookies(raw):
                 continue
@@ -405,6 +434,9 @@ async def download(url: str) -> Video:
             if isinstance(exc, DownloadError):
                 raise
             log.warning("Yuklash urinishi muvaffaqiyatsiz (%s): %s", cookies[0], raw)
+            hint = admin_hint(raw)
+            if hint:
+                log.warning("Bot egasiga maslahat: %s", hint)
             last_error = raw
             # Faqat autentifikatsiya bilan bog'liq xatoda keyingi usulga o'tamiz
             if index + 1 < len(plan) and _needs_cookies(raw):
