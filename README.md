@@ -73,8 +73,8 @@ botni kompyuterda ham ishga tushirsangiz, Telegram "conflict" xatosini beradi.
 2. Video havolasini tashlang, masalan:
    `https://www.instagram.com/reel/XXXXXXXX/`
 3. Bot videoni yuboradi, ostida **🎵 Qo'shiqni top** tugmasi chiqadi.
-4. Tugmani bosing — bot qo'shiqni topadi, kartochkasini va **mp3 audiosini
-   o'zi yuboradi**.
+4. **📥 Qo'shiqni yuklab olish** tugmasini bosing — bot qo'shiqni topib,
+   **mp3 audiosini o'zi yuboradi** (nomi, ijrochisi va muqovasi bilan).
 5. Audio ostidagi tugmalar bilan boshqa variantlarini olasiz:
 
 | Tugma | Nima qiladi |
@@ -145,6 +145,19 @@ Shazam topa olmagan holatda avtomatik ishlaydi.
 | `app/ffmpeg_setup.py` | ffmpeg ni avtomatik tayyorlash |
 | `app/security.py` | Xavfsizlik: havola tekshiruvi, limitlar, yo'l nazorati |
 | `app/texts.py` | Barcha o'zbekcha matnlar |
+
+## Guruhda ishlatish
+
+Har bir xabar ostida **«Guruhga qo'shish 🎵»** tugmasi bor. Botni guruhga
+qo'shgandan so'ng, u guruhdagi havolalarni ko'rishi uchun
+[@BotFather](https://t.me/BotFather) da **privacy rejimini o'chirish** kerak:
+
+```
+/setprivacy  →  botni tanlang  →  Disable
+```
+
+Aks holda bot guruhda faqat o'ziga yozilgan buyruqlarni ko'radi va
+tashlangan havolalarga javob bermaydi.
 
 ## Xavfsizlik
 

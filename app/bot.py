@@ -11,7 +11,6 @@ import sys
 from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
-from urllib.parse import quote_plus
 
 import aiohttp
 
@@ -32,7 +31,6 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
-    URLInputFile,
 )
 
 from . import config, security, storage, texts, variants
@@ -44,6 +42,9 @@ from .security import RateLimiter, safe_link
 from .storage import Job
 
 log = logging.getLogger("qushiq")
+
+# Bot username'i - izohlar va "Guruhga qo'shish" havolasi uchun
+BOT_USERNAME: str = ""
 
 # Telegram bot tokeni ko'rinishi: 123456789:AA...
 TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
@@ -66,11 +67,25 @@ def esc(text: str | None) -> str:
     return html.escape(text or "", quote=False)
 
 
+def group_button() -> list[InlineKeyboardButton]:
+    """«Guruhga qo'shish» tugmasi (bot nomi ma'lum bo'lsa)."""
+    if not BOT_USERNAME:
+        return []
+    return [
+        InlineKeyboardButton(
+            text="Guruhga qo'shish 🎵",
+            url=f"https://t.me/{BOT_USERNAME}?startgroup=true",
+        )
+    ]
+
+
 def find_button(token: str, again: bool = False) -> InlineKeyboardMarkup:
-    label = "🔄 Qayta urinish" if again else "🎵 Qo'shiqni yuklash"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"song:{token}")]]
-    )
+    label = "🔄 Qayta urinish" if again else "📥 Qo'shiqni yuklab olish"
+    rows = [[InlineKeyboardButton(text=label, callback_data=f"song:{token}")]]
+    group = group_button()
+    if group:
+        rows.append(group)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def variant_keyboard(token: str, exclude: str) -> InlineKeyboardMarkup:
@@ -85,56 +100,14 @@ def variant_keyboard(token: str, exclude: str) -> InlineKeyboardMarkup:
             )
             for key in keys[index:index + 2]
         ])
+    group = group_button()
+    if group:
+        rows.append(group)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def result_keyboard(track: Track, token: str) -> InlineKeyboardMarkup:
-    """Qo'shiq kartochkasi ostidagi tashqi havolalar."""
-    query = quote_plus(f"{track.artist} {track.title}".strip()[:200])
-    rows: list[list[InlineKeyboardButton]] = []
-
-    # Faqat http(s) havolalar qabul qilinadi
-    links: list[InlineKeyboardButton] = []
-    shazam_url = safe_link(track.url)
-    if shazam_url:
-        links.append(InlineKeyboardButton(text="🔎 Shazam", url=shazam_url))
-    apple = safe_link(
-        track.listen_links.get("Apple Music") or track.listen_links.get("Applemusic")
-    )
-    if apple:
-        links.append(InlineKeyboardButton(text="🍏 Apple Music", url=apple))
-    if links:
-        rows.append(links)
-
-    rows.append([
-        InlineKeyboardButton(
-            text="▶️ YouTube",
-            url=f"https://www.youtube.com/results?search_query={query}",
-        ),
-        InlineKeyboardButton(
-            text="🟢 Spotify",
-            url=f"https://open.spotify.com/search/{query}",
-        ),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def format_track(track: Track) -> str:
-    lines = [
-        f"🎵 <b>{esc(track.title)}</b>",
-        f"👤 {esc(track.artist)}",
-    ]
-
-    details = [esc(x) for x in (track.album, track.released, track.genre) if x]
-    if details:
-        lines.append("💿 " + " · ".join(details))
-
-    lines += [
-        "",
-        f"📊 Ishonchlilik: <b>{track.confidence}</b> "
-        f"({track.hits}/{max(track.attempts, track.hits)} moslik)",
-    ]
-    return "\n".join(lines)
 
 
 async def safe_edit(message: Message | None, text: str) -> None:
@@ -234,10 +207,7 @@ async def on_link(message: Message) -> None:
 
         await storage.put(job)
 
-        caption = f"🎬 <b>{esc(video.title[:200])}</b>"
-        if video.uploader:
-            caption += f"\n👤 {esc(video.uploader[:80])}"
-        caption += f"\n\n{texts.CAPTION_HINT}"
+        caption = texts.video_caption(BOT_USERNAME)
 
         if video.size_mb > config.MAX_UPLOAD_MB:
             await safe_edit(status, texts.TOO_BIG.format(limit=config.MAX_UPLOAD_MB))
@@ -289,19 +259,6 @@ async def on_link(message: Message) -> None:
 # --------------------------------------------------------------------------- #
 # "Qo'shiqni top" tugmasi
 # --------------------------------------------------------------------------- #
-async def send_result(message: Message, track: Track, token: str) -> None:
-    text = format_track(track)
-    keyboard = result_keyboard(track, token)
-    cover = safe_link(track.cover)
-    if cover:
-        try:
-            await message.answer_photo(
-                URLInputFile(cover), caption=text, reply_markup=keyboard
-            )
-            return
-        except Exception as exc:  # noqa: BLE001
-            log.debug("Muqovani yuborib bo'lmadi: %s", exc)
-    await message.answer(text, reply_markup=keyboard, disable_web_page_preview=True)
 
 
 @router.callback_query(F.data.startswith("song:"))
@@ -331,7 +288,7 @@ async def on_find_song(callback: CallbackQuery) -> None:
     # Avval topilgan bo'lsa - darhol qaytaramiz (fayllar o'chgan bo'lsa ham)
     if job.result:
         await callback.answer("Natija tayyor ✅")
-        await send_result(message, Track(**job.result), token)
+        await deliver_variant(message, job, Track(**job.result), variants.AUTO_KEY)
         return
 
     if job.expired:
@@ -390,9 +347,7 @@ async def on_find_song(callback: CallbackQuery) -> None:
     job.not_found = False
     await storage.update(job)
 
-    # Avval qo'shiq kartochkasi, so'ng audiosi o'zi yuboriladi -
-    # foydalanuvchi qo'shimcha tugma bosishi shart emas.
-    await send_result(message, track, token)
+    # Qo'shiq audiosi to'g'ridan-to'g'ri yuboriladi - qo'shimcha bosish shart emas
     await deliver_variant(message, job, track, variants.AUTO_KEY)
 
 
@@ -444,7 +399,7 @@ async def deliver_variant(message: Message, job: Job, track: Track, key: str) ->
 
     token = job.token
     audio_title = f"{track.title}{variant.suffix}"
-    caption = f"🎵 <b>{esc(audio_title)}</b>\n👤 {esc(track.artist)}"
+    caption = texts.audio_caption(esc(track.artist), esc(audio_title), BOT_USERNAME)
     keyboard = variant_keyboard(token, key)
 
     # 1) Avval yuborilgan bo'lsa - Telegram file_id orqali bir zumda qaytaramiz
@@ -643,6 +598,8 @@ async def main() -> None:
                 "BOT_TOKEN noto'g'ri yoki bekor qilingan. @BotFather dan yangi "
                 "token oling va .env fayliga yozing."
             ) from None
+        global BOT_USERNAME
+        BOT_USERNAME = me.username or ""
         log.info("Bot ishga tushdi: @%s", me.username)
         await bot.delete_webhook(drop_pending_updates=True)
 

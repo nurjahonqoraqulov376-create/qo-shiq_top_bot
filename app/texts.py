@@ -7,7 +7,7 @@ START = (
     "boshqa video havolasini yuboring.\n\n"
     "Men:\n"
     "1️⃣ videoni yuklab beraman;\n"
-    "2️⃣ uning ostida <b>🎵 Qo'shiqni yuklash</b> tugmasi chiqadi;\n"
+    "2️⃣ uning ostida <b>📥 Qo'shiqni yuklab olish</b> tugmasi chiqadi;\n"
     "3️⃣ tugmani bossangiz — qo'shiqni topib, <b>audiosini o'zim yuboraman</b>;\n"
     "4️⃣ audio ostidagi tugmalar bilan boshqa variantlarini olasiz:\n\n"
     "🐌 Slowed  ·  🌊 Slowed + Reverb  ·  ⚡ Speed Up\n\n"
@@ -46,7 +46,24 @@ DOWNLOADING = "⏳ Video yuklanmoqda, biroz kuting..."
 UPLOADING = "📤 Video yuborilmoqda..."
 BUSY = "⌛ Oldingi videongiz hali tayyor bo'lmadi. Biroz kuting."
 
-CAPTION_HINT = "👇 Videodagi qo'shiqni yuklab olish uchun tugmani bosing"
+
+def video_caption(bot_username: str) -> str:
+    """Yuborilgan video ostidagi izoh."""
+    if bot_username:
+        return f"📥 @{bot_username} orqali yuklab olindi"
+    return "📥 Video yuklab olindi"
+
+
+def audio_caption(artist: str, title: str, bot_username: str) -> str:
+    """Yuborilgan audio ostidagi izoh."""
+    lines = [f"🎵 <b>{title}</b>", f"👤 {artist}"]
+    if bot_username:
+        lines += [
+            "",
+            f"@{bot_username} orqali istagan musiqangizni tez va oson toping!",
+        ]
+    return "\n".join(lines)
+
 
 SEARCHING = "🔎 Qo'shiq qidirilmoqda..."
 SEARCHING_STEP = "🔎 Qo'shiq qidirilmoqda... ({step}/{total})"
