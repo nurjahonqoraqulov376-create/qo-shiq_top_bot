@@ -1,0 +1,466 @@
+"""Telegram bot: video havolasi -> video + "Qo'shiqni top" tugmasi -> qo'shiq nomi."""
+from __future__ import annotations
+
+import asyncio
+import html
+import logging
+import re
+import shutil
+import sys
+from dataclasses import asdict
+from pathlib import Path
+from urllib.parse import quote_plus
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.enums import ChatAction, ParseMode
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramConflictError,
+    TelegramUnauthorizedError,
+)
+from aiogram.filters import Command, CommandStart
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    URLInputFile,
+)
+
+from . import config, security, storage, texts
+from .audio import AudioError, ensure_mp4, extract_audio, wav_duration
+from .downloader import DownloadError, Video, download, find_url
+from .ffmpeg_setup import ensure_ffmpeg
+from .recognizer import Track, identify
+from .security import RateLimiter, safe_link
+from .storage import Job
+
+log = logging.getLogger("qushiq")
+
+# Telegram bot tokeni ko'rinishi: 123456789:AA...
+TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
+
+router = Router()
+
+_download_sem = asyncio.Semaphore(config.MAX_CONCURRENT_DOWNLOADS)
+_busy_users: set[int] = set()
+_searching: set[str] = set()
+
+# Qidiruv tugmasi uchun alohida, yumshoqroq cheklov (yuklashsiz, arzonroq amal)
+_search_limiter = RateLimiter(config.RATE_LIMIT_PER_HOUR * 2, cooldown=3)
+
+
+# --------------------------------------------------------------------------- #
+# Yordamchi funksiyalar
+# --------------------------------------------------------------------------- #
+def esc(text: str | None) -> str:
+    return html.escape(text or "", quote=False)
+
+
+def find_button(token: str, again: bool = False) -> InlineKeyboardMarkup:
+    label = "🔄 Qayta urinish" if again else "🎵 Qo'shiqni top"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"song:{token}")]]
+    )
+
+
+def result_keyboard(track: Track, token: str) -> InlineKeyboardMarkup:
+    query = quote_plus(f"{track.artist} {track.title}".strip()[:200])
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # Tashqi havolalar tekshiriladi: faqat http(s) qabul qilinadi
+    first: list[InlineKeyboardButton] = []
+    shazam_url = safe_link(track.url)
+    if shazam_url:
+        first.append(InlineKeyboardButton(text="🔎 Shazam", url=shazam_url))
+    apple = safe_link(
+        track.listen_links.get("Apple Music") or track.listen_links.get("Applemusic")
+    )
+    if apple:
+        first.append(InlineKeyboardButton(text="🍏 Apple Music", url=apple))
+    if first:
+        rows.append(first)
+
+    rows.append([
+        InlineKeyboardButton(
+            text="▶️ YouTube",
+            url=f"https://www.youtube.com/results?search_query={query}",
+        ),
+        InlineKeyboardButton(
+            text="🎧 Spotify",
+            url=f"https://open.spotify.com/search/{query}",
+        ),
+    ])
+    rows.append([
+        InlineKeyboardButton(text="🔄 Qaytadan qidirish", callback_data=f"song:{token}")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_track(track: Track) -> str:
+    lines = [
+        "✅ <b>Qo'shiq topildi!</b>",
+        "",
+        f"🎵 <b>Nomi:</b> {esc(track.title)}",
+        f"👤 <b>Ijrochi:</b> {esc(track.artist)}",
+    ]
+    if track.album:
+        lines.append(f"💿 <b>Albom:</b> {esc(track.album)}")
+    if track.released:
+        lines.append(f"📅 <b>Chiqqan yili:</b> {esc(track.released)}")
+    if track.genre:
+        lines.append(f"🎼 <b>Janr:</b> {esc(track.genre)}")
+    lines += [
+        "",
+        f"📊 <b>Ishonchlilik:</b> {track.confidence} "
+        f"({track.hits}/{max(track.attempts, track.hits)} moslik)",
+        f"🔍 <i>Manba: {esc(track.source)}</i>",
+    ]
+    return "\n".join(lines)
+
+
+async def safe_edit(message: Message | None, text: str) -> None:
+    if message is None:
+        return
+    try:
+        await message.edit_text(text)
+    except TelegramBadRequest:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Xabarni tahrirlab bo'lmadi: %s", exc)
+
+
+async def safe_delete(message: Message | None) -> None:
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# Buyruqlar
+# --------------------------------------------------------------------------- #
+@router.message(CommandStart())
+async def cmd_start(message: Message) -> None:
+    await message.answer(texts.START, disable_web_page_preview=True)
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await message.answer(texts.HELP, disable_web_page_preview=True)
+
+
+# --------------------------------------------------------------------------- #
+# Havola qabul qilish
+# --------------------------------------------------------------------------- #
+@router.message(F.text & ~F.text.startswith("/"))
+@router.message(F.caption)          # havola rasm/video izohida kelgan holat
+async def on_link(message: Message) -> None:
+    url = find_url(message.text or message.caption or "")
+    if not url:
+        await message.answer(texts.NO_URL)
+        return
+
+    user_id = message.from_user.id if message.from_user else message.chat.id
+    if not security.is_allowed_user(user_id):
+        await message.answer(texts.NOT_ALLOWED)
+        return
+    if user_id in _busy_users:
+        await message.answer(texts.BUSY)
+        return
+    warning = security.rate_check(security.limiter, user_id)
+    if warning:
+        await message.answer(warning)
+        return
+
+    _busy_users.add(user_id)
+    status = await message.answer(texts.DOWNLOADING)
+    video: Video | None = None
+    token: str | None = None
+    try:
+        # Disk to'lib ketmasligi uchun tekshiruv
+        used_mb = await asyncio.to_thread(storage.disk_usage_mb)
+        if used_mb > config.MAX_DISK_MB:
+            await storage.cleanup_once()
+            used_mb = await asyncio.to_thread(storage.disk_usage_mb)
+            if used_mb > config.MAX_DISK_MB:
+                log.warning("Disk chegarasi: %.0f MB / %s MB", used_mb, config.MAX_DISK_MB)
+                await safe_edit(status, texts.DISK_BUSY)
+                return
+
+        async with _download_sem:
+            await message.bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
+            video = await download(url)
+
+        token = storage.new_token()
+        job = Job(
+            token=token,
+            user_id=user_id,
+            chat_id=message.chat.id,
+            url=video.webpage_url,
+            title=video.title,
+            work_dir=str(video.work_dir),
+        )
+
+        # Audio darhol ajratiladi - tugma bosilganda javob tez bo'lishi uchun
+        try:
+            wav = await extract_audio(video.path, video.work_dir / "audio.wav")
+            if wav_duration(wav) >= 1.0:
+                job.audio_path = str(wav)
+        except AudioError as exc:
+            log.info("Audio ajratilmadi: %s", exc)
+        except Exception:  # noqa: BLE001
+            log.exception("Audio ajratishda kutilmagan xato")
+
+        await storage.put(job)
+
+        caption = f"🎬 <b>{esc(video.title[:200])}</b>"
+        if video.uploader:
+            caption += f"\n👤 {esc(video.uploader[:80])}"
+        caption += f"\n\n{texts.CAPTION_HINT}"
+
+        if video.size_mb > config.MAX_UPLOAD_MB:
+            await safe_edit(status, texts.TOO_BIG.format(limit=config.MAX_UPLOAD_MB))
+            await message.answer(caption, reply_markup=find_button(token))
+            return
+
+        await safe_edit(status, texts.UPLOADING)
+        await message.bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
+
+        kwargs: dict = {}
+        if video.width and video.height:
+            kwargs.update(width=video.width, height=video.height)
+        if video.duration:
+            kwargs["duration"] = int(video.duration)
+
+        # webm/mkv bo'lsa mp4 ga o'raymiz - Telegram to'g'ri ko'rsatishi uchun
+        send_path = await ensure_mp4(video.path)
+
+        try:
+            await message.answer_video(
+                FSInputFile(send_path, filename=send_path.name),
+                caption=caption,
+                reply_markup=find_button(token),
+                supports_streaming=True,
+                **kwargs,
+            )
+        except (TelegramAPIError, OSError) as exc:
+            log.warning("Video yuborilmadi (%s), matn bilan davom etamiz", exc)
+            await message.answer(
+                caption + "\n\n⚠️ <i>Videoni yuborib bo'lmadi, lekin qo'shiqni topa olaman.</i>",
+                reply_markup=find_button(token),
+            )
+        await safe_delete(status)
+
+    except DownloadError as exc:
+        await safe_edit(status, f"❌ {esc(str(exc))}")
+    except Exception:  # noqa: BLE001
+        log.exception("Havolani qayta ishlashda xato")
+        await safe_edit(status, texts.ERROR)
+        # Yarim qolgan ish uchun tugma qoldirmaymiz: yozuv va fayllarni o'chiramiz
+        if token is not None:
+            await storage.drop(token)
+        elif video is not None:
+            shutil.rmtree(video.work_dir, ignore_errors=True)
+    finally:
+        _busy_users.discard(user_id)
+
+
+# --------------------------------------------------------------------------- #
+# "Qo'shiqni top" tugmasi
+# --------------------------------------------------------------------------- #
+async def send_result(message: Message, track: Track, token: str) -> None:
+    text = format_track(track)
+    keyboard = result_keyboard(track, token)
+    cover = safe_link(track.cover)
+    if cover:
+        try:
+            await message.answer_photo(
+                URLInputFile(cover), caption=text, reply_markup=keyboard
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Muqovani yuborib bo'lmadi: %s", exc)
+    await message.answer(text, reply_markup=keyboard, disable_web_page_preview=True)
+
+
+@router.callback_query(F.data.startswith("song:"))
+async def on_find_song(callback: CallbackQuery) -> None:
+    token = (callback.data or "").split(":", 1)[1]
+    message = callback.message
+    if message is None:
+        await callback.answer()
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    if not security.is_allowed_user(user_id):
+        await callback.answer(texts.NOT_ALLOWED, show_alert=True)
+        return
+
+    job = await storage.get(token)
+    if job is None:
+        await callback.answer("Ma'lumot eskirgan", show_alert=False)
+        await message.answer(texts.EXPIRED)
+        return
+
+    # Tugma faqat o'zi tug'ilgan suhbatda ishlaydi
+    if job.chat_id != message.chat.id:
+        await callback.answer(texts.WRONG_CHAT, show_alert=True)
+        return
+
+    # Avval topilgan bo'lsa - darhol qaytaramiz (fayllar o'chgan bo'lsa ham)
+    if job.result:
+        await callback.answer("Natija tayyor ✅")
+        await send_result(message, Track(**job.result), token)
+        return
+
+    if job.expired:
+        await callback.answer("Ma'lumot eskirgan", show_alert=False)
+        await message.answer(texts.EXPIRED)
+        return
+
+    if token in _searching:
+        await callback.answer(texts.ALREADY_SEARCHING, show_alert=True)
+        return
+
+    # Audio fayl haqiqatan ham o'z papkamiz ichidami (buzilgan yozuvga qarshi)
+    audio = Path(job.audio_path) if job.audio_path else None
+    if (
+        audio is None
+        or not security.is_inside(audio, config.DOWNLOAD_DIR)
+        or not audio.exists()
+    ):
+        await callback.answer()
+        await message.answer(texts.NO_AUDIO)
+        return
+
+    warning = security.rate_check(_search_limiter, user_id)
+    if warning:
+        await callback.answer(warning[:190], show_alert=True)
+        return
+
+    _searching.add(token)
+    await callback.answer("Qidirilmoqda... 🔎")
+    status = await message.answer(texts.SEARCHING)
+
+    async def on_progress(step: int, total: int) -> None:
+        if total <= 0:                      # chuqurroq qidiruv bosqichi
+            await safe_edit(status, texts.SEARCHING_DEEP)
+        else:
+            await safe_edit(status, texts.SEARCHING_STEP.format(step=step, total=total))
+
+    try:
+        track = await identify(audio, on_progress=on_progress)
+    except Exception:  # noqa: BLE001
+        log.exception("Qo'shiq qidirishda xato")
+        await safe_edit(status, texts.ERROR)
+        return
+    finally:
+        _searching.discard(token)
+
+    await safe_delete(status)
+
+    if track is None:
+        job.not_found = True
+        await storage.update(job)
+        await message.answer(texts.NOT_FOUND, reply_markup=find_button(token, again=True))
+        return
+
+    job.result = asdict(track)
+    job.not_found = False
+    await storage.update(job)
+    await send_result(message, track, token)
+
+
+@router.message()
+async def fallback(message: Message) -> None:
+    await message.answer(texts.NO_URL)
+
+
+# --------------------------------------------------------------------------- #
+# Ishga tushirish
+# --------------------------------------------------------------------------- #
+async def main() -> None:
+    # Windows konsoli emoji va boshqa belgilarni ko'tara olishi uchun
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, OSError, ValueError):
+            pass
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    logging.getLogger("aiogram.event").setLevel(logging.WARNING)
+
+    if not config.BOT_TOKEN:
+        raise SystemExit(
+            "BOT_TOKEN topilmadi. Loyiha papkasidagi .env fayliga "
+            "BOT_TOKEN=... yozing (.env.example dan nusxa oling)."
+        )
+    if not TOKEN_RE.fullmatch(config.BOT_TOKEN):
+        raise SystemExit(
+            "BOT_TOKEN ko'rinishi noto'g'ri. U «123456789:AA...» shaklida bo'lishi kerak."
+        )
+    if config.ALLOWED_USERS:
+        log.info("Yopiq rejim: faqat %d ta foydalanuvchi", len(config.ALLOWED_USERS))
+
+    ensure_ffmpeg()
+    storage.load()
+
+    session = AiohttpSession(timeout=300)
+    bot = Bot(
+        token=config.BOT_TOKEN,
+        session=session,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    dp = Dispatcher()
+    dp.include_router(router)
+
+    cleaner = asyncio.create_task(
+        storage.cleanup_loop(on_tick=security.limiter.forget_old)
+    )
+    try:
+        try:
+            me = await bot.get_me()
+        except TelegramUnauthorizedError:
+            raise SystemExit(
+                "BOT_TOKEN noto'g'ri yoki bekor qilingan. @BotFather dan yangi "
+                "token oling va .env fayliga yozing."
+            ) from None
+        log.info("Bot ishga tushdi: @%s", me.username)
+        await bot.delete_webhook(drop_pending_updates=True)
+        try:
+            await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        except TelegramConflictError:
+            raise SystemExit(
+                "Bu bot allaqachon boshqa joyda ishlab turibdi. Avvalgi nusxasini "
+                "to'xtating (bir vaqtda faqat bitta nusxa ishlashi mumkin)."
+            ) from None
+    finally:
+        cleaner.cancel()
+        await asyncio.gather(cleaner, return_exceptions=True)
+        await bot.session.close()
+
+
+def run() -> None:
+    # Diqqat: Windows'da standart ProactorEventLoop qoldiriladi -
+    # SelectorEventLoop subprocess (ffmpeg) ni qo'llab-quvvatlamaydi.
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit) as exc:
+        if isinstance(exc, SystemExit) and exc.code:
+            raise
+        print("\nBot to'xtatildi.")
+
+
+if __name__ == "__main__":
+    run()
