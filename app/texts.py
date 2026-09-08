@@ -2,16 +2,8 @@
 from __future__ import annotations
 
 START = (
-    "🎬 <b>Qo'shiq izlovchi botga xush kelibsiz!</b>\n\n"
-    "Menga <b>Instagram Reels</b>, <b>YouTube Shorts</b>, <b>TikTok</b> yoki "
-    "boshqa video havolasini yuboring.\n\n"
-    "Men:\n"
-    "1️⃣ videoni yuklab beraman;\n"
-    "2️⃣ uning ostida <b>📥 Qo'shiqni yuklab olish</b> tugmasi chiqadi;\n"
-    "3️⃣ tugmani bossangiz — qo'shiqni topib, <b>audiosini o'zim yuboraman</b>;\n"
-    "4️⃣ audio ostidagi tugmalar bilan boshqa variantlarini olasiz:\n\n"
-    "🐌 Slowed  ·  🌊 Slowed + Reverb  ·  ⚡ Speed Up\n\n"
-    "👇 Hoziroq havola yuboring."
+    "🎵 <b>Xush kelibsiz!</b>\n\n"
+    "Video havolasini yuboring — qo'shig'ini topib beraman."
 )
 
 HELP = (
