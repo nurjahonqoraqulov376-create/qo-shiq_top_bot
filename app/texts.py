@@ -3,7 +3,8 @@ from __future__ import annotations
 
 START = (
     "🎵 <b>Xush kelibsiz!</b>\n\n"
-    "Video havolasini yuboring — qo'shig'ini topib beraman."
+    "Video havolasini yuboring — qo'shig'ini topib beraman.\n"
+    "Yoki shunchaki qo'shiq nomini yozing."
 )
 
 HELP = (
@@ -30,8 +31,9 @@ HELP = (
 )
 
 NO_URL = (
-    "🔗 Iltimos, video <b>havolasini</b> yuboring.\n"
-    "Masalan: <code>https://www.instagram.com/reel/...</code>"
+    "🔗 Video <b>havolasini</b> yuboring yoki <b>qo'shiq nomini</b> yozing.\n"
+    "Masalan: <code>https://www.instagram.com/reel/...</code>\n"
+    "yoki: <code>Despacito Luis Fonsi</code>"
 )
 
 DOWNLOADING = "⏳ Video yuklanmoqda, biroz kuting..."
@@ -62,8 +64,10 @@ def audio_caption(
 
 
 SEARCHING = "🔎 Qo'shiq qidirilmoqda..."
+SONG_SEARCHING = "🔎 Qo'shiq qidirilmoqda, biroz kuting..."
 SEARCHING_STEP = "🔎 Qo'shiq qidirilmoqda... ({step}/{total})"
 SEARCHING_DEEP = "🔬 Chuqurroq qidirilmoqda, biroz kuting..."
+SEARCHING_SPEED = "🎚 Tezligi o'zgartirilgan musiqa tekshirilmoqda..."
 ALREADY_SEARCHING = "⏳ Qidiruv allaqachon davom etyapti..."
 
 EXPIRED = (

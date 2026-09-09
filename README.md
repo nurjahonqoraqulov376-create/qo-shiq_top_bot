@@ -20,6 +20,20 @@ Aniqlik uchun video **bitta emas, bir necha bo'lagidan** qidiriladi
 tekshiriladi). Ikki bo'lak bir xil natija bersa — javob darhol qaytariladi va
 "ishonchlilik: yuqori" deb belgilanadi.
 
+Birinchi urinishda topilmasa, bot **taslim bo'lmaydi** va qiyinlashtirib
+qayta tinglaydi:
+
+| Bosqich | Nima qilinadi |
+|---|---|
+| 1 | oddiy bo'laklar (tez) |
+| 2 | ovozi kuchaytirilgan, uzunroq bo'laklar — past/shovqinli yozuvlar uchun |
+| 3 | tezligi qaytarilgan bo'laklar — kuchli tezlashtirilgan/sekinlashtirilgan musiqa uchun |
+| 4 | bitta uzun (60s) bo'lak |
+| 5 | ACRCloud (agar sozlangan bo'lsa) |
+
+3-bosqichda tovush sun'iy o'zgargani uchun natija faqat **ikki marta
+takrorlansa** qabul qilinadi — noto'g'ri qo'shiq chiqmasligi uchun.
+
 ## Talablar
 
 - Python 3.10+
@@ -70,8 +84,9 @@ botni kompyuterda ham ishga tushirsangiz, Telegram "conflict" xatosini beradi.
 ## Foydalanish
 
 1. Botga `/start` yuboring.
-2. Video havolasini tashlang, masalan:
-   `https://www.instagram.com/reel/XXXXXXXX/`
+2. **Ikki xil ishlatish mumkin:**
+   - video havolasini tashlang: `https://www.instagram.com/reel/XXXXXXXX/`
+   - yoki shunchaki qo'shiq nomini yozing: `Despacito Luis Fonsi`
 3. Bot videoni yuboradi, ostida **📥 Qo'shiqni yuklab olish** tugmasi chiqadi.
 4. **📥 Qo'shiqni yuklab olish** tugmasini bosing — bot qo'shiqni topib,
    **mp3 audiosini o'zi yuboradi** (nomi, ijrochisi va muqovasi bilan).

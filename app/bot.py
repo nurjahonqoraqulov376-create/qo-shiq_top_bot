@@ -53,7 +53,7 @@ from .downloader import (
     find_url,
 )
 from .ffmpeg_setup import ensure_ffmpeg
-from .recognizer import Track, identify
+from .recognizer import Track, identify, search_by_name
 from .security import RateLimiter, safe_link
 from .storage import Job
 
@@ -192,13 +192,74 @@ async def restore_audio(video: Video, url: str) -> None:
     log.info("Videoga ovoz qo'shildi: %s", merged.name)
 
 
+def split_song_title(raw: str) -> tuple[str, str]:
+    """YouTube sarlavhasidan "Ijrochi - Nom" ni ajratadi."""
+    cleaned = " ".join((raw or "").split())
+    for separator in (" - ", " – ", " — ", " | "):
+        if separator in cleaned:
+            artist, title = cleaned.split(separator, 1)
+            if artist.strip() and title.strip():
+                return artist.strip()[:80], title.strip()[:80]
+    return "", cleaned[:80]
+
+
+async def find_song_by_text(query: str) -> Track:
+    """Matn bo'yicha qo'shiq ma'lumotini tayyorlaydi.
+
+    Avval Apple katalogidan qidiriladi (muqova, albom, parcha bilan).
+    U yerda bo'lmasa (masalan mahalliy qo'shiqlar), matnning o'zi qidiruv
+    so'rovi sifatida ishlatiladi - audio manbasi uni YouTube'dan topadi.
+    """
+    track = await search_by_name(query)
+    if track is not None:
+        return track
+    log.info("Apple katalogida topilmadi, matn bo'yicha qidiriladi: %s", query[:80])
+    return Track(
+        title=" ".join(query.split())[:80],
+        artist="",
+        key=f"query|{query.strip().lower()}"[:120],
+        source="Qidiruv",
+    )
+
+
+async def handle_song_query(message: Message, query: str, user_id: int) -> None:
+    """Foydalanuvchi qo'shiq nomini yozganda ishlaydi (havolasiz)."""
+    status = await message.answer(texts.SONG_SEARCHING)
+    work_dir = config.DOWNLOAD_DIR / f"q_{storage.new_token()[:12]}"
+    try:
+        track = await find_song_by_text(query)
+
+        job = Job(
+            token=storage.new_token(),
+            user_id=user_id,
+            chat_id=message.chat.id,
+            url="",
+            title=query[:200],
+            work_dir=str(work_dir),
+            result=asdict(track),
+        )
+        await storage.put(job)
+        await safe_delete(status)
+        status = None
+
+        sent = await deliver_variant(message, job, track, variants.AUTO_KEY)
+        if not sent:
+            await storage.drop(job.token)
+    except DownloadError as exc:
+        await safe_edit(status, f"❌ {esc(str(exc))}")
+        shutil.rmtree(work_dir, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        log.exception("Nom bo'yicha qidirishda xato")
+        await safe_edit(status, texts.ERROR)
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 @router.message(F.caption)          # havola rasm/video izohida kelgan holat
 async def on_link(message: Message) -> None:
-    url = find_url(message.text or message.caption or "")
-    if not url:
-        await message.answer(texts.NO_URL)
-        return
+    """Havola bo'lsa - video yuklanadi, aks holda matn qo'shiq nomi deb qidiriladi."""
+    text = (message.text or message.caption or "").strip()
+    url = find_url(text)
 
     user_id = message.from_user.id if message.from_user else message.chat.id
     if not security.is_allowed_user(user_id):
@@ -207,6 +268,22 @@ async def on_link(message: Message) -> None:
     if user_id in _busy_users:
         await message.answer(texts.BUSY)
         return
+
+    if url is None:
+        if len(text) < 3:
+            await message.answer(texts.NO_URL)
+            return
+        warning = security.rate_check(security.limiter, user_id)
+        if warning:
+            await message.answer(warning)
+            return
+        _busy_users.add(user_id)
+        try:
+            await handle_song_query(message, text, user_id)
+        finally:
+            _busy_users.discard(user_id)
+        return
+
     warning = security.rate_check(security.limiter, user_id)
     if warning:
         await message.answer(warning)
@@ -371,7 +448,9 @@ async def on_find_song(callback: CallbackQuery) -> None:
     status = await message.answer(texts.SEARCHING)
 
     async def on_progress(step: int, total: int) -> None:
-        if total <= 0:                      # chuqurroq qidiruv bosqichi
+        if total < 0:                       # tezlik tuzatish bosqichi
+            await safe_edit(status, texts.SEARCHING_SPEED)
+        elif total == 0:                    # chuqurroq tinglash bosqichi
             await safe_edit(status, texts.SEARCHING_DEEP)
         else:
             await safe_edit(status, texts.SEARCHING_STEP.format(step=step, total=total))
@@ -507,12 +586,20 @@ async def deliver_variant(message: Message, job: Job, track: Track, key: str) ->
             job.song_path = str(song.path)
             job.song_duration = song.duration
             job.song_is_preview = song.is_preview
+
+            # Nom bo'yicha qidirilgan bo'lsa, aniq nomini manbadan olamiz
+            if track.source == "Qidiruv" and song.title:
+                artist, title = split_song_title(song.title)
+                track.title = title or track.title
+                track.artist = artist or track.artist or "Noma'lum ijrochi"
+                job.result = asdict(track)
+                audio_title = f"{track.title}{variant.suffix}"
+
             await storage.update(job)
             song_path = song.path
-            if song.is_preview:
-                caption = texts.audio_caption(
-                    esc(track.artist), esc(audio_title), BOT_USERNAME, True
-                )
+            caption = texts.audio_caption(
+                esc(track.artist), esc(audio_title), BOT_USERNAME, song.is_preview
+            )
 
         # 3) Muqova (ixtiyoriy - bo'lmasa ham audio yuboriladi)
         thumb = Path(job.thumb_path) if job.thumb_path else None

@@ -63,18 +63,33 @@ def wav_duration(path: Path) -> float:
     return max(0.0, (size - WAV_HEADER) / BYTES_PER_SEC)
 
 
-async def cut_clip(src_wav: Path, out_path: Path, start: float, length: float) -> Path:
-    """WAV dan `start` soniyadan boshlab `length` soniyalik bo'lak kesadi."""
+async def cut_clip(
+    src_wav: Path,
+    out_path: Path,
+    start: float,
+    length: float,
+    audio_filter: str | None = None,
+) -> Path:
+    """WAV dan `start` soniyadan boshlab `length` soniyalik bo'lak kesadi.
+
+    `audio_filter` berilsa (masalan ovozni kuchaytirish yoki tezlikni
+    qaytarish), bo'lak o'sha filtr bilan tayyorlanadi.
+    """
     ffmpeg = ensure_ffmpeg()
-    await run_ffmpeg([
+    args = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-ss", f"{max(0.0, start):.2f}",
         "-t", f"{length:.2f}",
         "-i", str(src_wav),
+    ]
+    if audio_filter:
+        args += ["-af", audio_filter]
+    args += [
         "-ac", str(CHANNELS), "-ar", str(SAMPLE_RATE),
         "-c:a", "pcm_s16le", "-f", "wav",
         str(out_path),
-    ], timeout=60)
+    ]
+    await run_ffmpeg(args, timeout=90)
     if not out_path.exists() or out_path.stat().st_size <= WAV_HEADER:
         raise AudioError("Audio bo'lagini kesib bo'lmadi.")
     return out_path

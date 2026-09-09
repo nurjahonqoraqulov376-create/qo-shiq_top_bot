@@ -15,9 +15,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import config
-from .audio import cut_clip, plan_offsets, wav_duration
+from .audio import SAMPLE_RATE, cut_clip, plan_offsets, wav_duration
 
 log = logging.getLogger(__name__)
+
+# Past yoki shovqinli yozuvlar uchun: quyi shovqinni kesib, ovozni tenglashtirish
+ENHANCE_FILTER = "highpass=f=90,dynaudnorm=p=0.9:s=5"
+
+# Reels/TikTok'da musiqa ko'pincha tezlashtirilgan (yoki sekinlashtirilgan)
+# bo'ladi. Shazam bunday audioni tanimaydi, shuning uchun tezlikni qaytaramiz.
+# Koeffitsient - asl tezlikka qaytarish uchun ko'paytiruvchi.
+SPEED_FIXES: tuple[float, ...] = (0.80, 0.87, 1.15, 1.25)
+
+
+def speed_filter(factor: float) -> str:
+    """Audio tezligini (va tovush balandligini) `factor` marta o'zgartiradi."""
+    return f"asetrate={SAMPLE_RATE}*{factor:.3f},aresample={SAMPLE_RATE}"
 
 
 @dataclass(slots=True)
@@ -225,7 +238,21 @@ async def _acrcloud_recognize(clip: Path) -> Track | None:
 # Asosiy funksiya
 # --------------------------------------------------------------------------- #
 async def identify(wav_path: Path, on_progress=None) -> Track | None:
-    """Audio fayldan qo'shiqni aniqlaydi. Topilmasa None qaytaradi."""
+    """Audio fayldan qo'shiqni aniqlaydi. Topilmasa None qaytaradi.
+
+    Bir marta tinglab qo'ya qolmaydi - topilmasa bosqichma-bosqich
+    qiyinlashtirib qayta tinglaydi:
+
+    1. oddiy bo'laklar (tez);
+    2. ovozi kuchaytirilgan, uzunroq bo'laklar (past/shovqinli yozuvlar uchun);
+    3. tezligi qaytarilgan bo'laklar (reels'da musiqa ko'pincha tezlashtirilgan
+       yoki sekinlashtirilgan bo'ladi - Shazam bunday audioni tanimaydi);
+    4. bitta uzun bo'lak;
+    5. ACRCloud (agar sozlangan bo'lsa).
+
+    `on_progress(step, total)`: total > 0 - oddiy qadam, 0 - chuqur tinglash,
+    -1 - tezlikni tekshirish bosqichi.
+    """
     duration = wav_duration(wav_path)
     if duration < 1.0:
         return None
@@ -238,64 +265,110 @@ async def identify(wav_path: Path, on_progress=None) -> Track | None:
     votes: dict[str, Track] = {}
     attempts = 0
 
-    for index, offset in enumerate(offsets, start=1):
-        attempts = index
-        if on_progress:
-            try:
-                await on_progress(index, len(offsets))
-            except Exception:  # noqa: BLE001
-                pass
-
-        clip_path = clips_dir / f"clip_{index}.wav"
+    async def note(step: int, total: int) -> None:
+        if on_progress is None:
+            return
         try:
-            length = min(clip_len, max(1.0, duration - offset))
-            await cut_clip(wav_path, clip_path, offset, length)
+            await on_progress(step, total)
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def probe(
+        offset: float,
+        length: float,
+        audio_filter: str | None,
+        name: str,
+        timeout: float = 45,
+    ) -> Track | None:
+        """Bitta bo'lakni tinglaydi. Ikkinchi bir xil natija chiqsa - tasdiq."""
+        nonlocal attempts
+        attempts += 1
+        clip_path = clips_dir / f"{name}.wav"
+        try:
+            span = min(length, max(1.0, duration - offset))
+            await cut_clip(wav_path, clip_path, offset, span, audio_filter)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Bo'lak kesilmadi (%.1fs): %s", offset, exc)
-            continue
+            log.warning("Bo'lak kesilmadi (%s): %s", name, exc)
+            return None
 
-        track = _parse_shazam(await _shazam_recognize(clip_path))
+        track = _parse_shazam(await _shazam_recognize(clip_path, timeout=timeout))
         clip_path.unlink(missing_ok=True)
+        if track is None:
+            return None
 
-        if track:
-            existing = votes.get(track.key)
-            if existing:
-                existing.hits += 1
-                if existing.hits >= 2:  # ikki bo'lak bir xil natija berdi
-                    existing.attempts = attempts
-                    return existing
-            else:
-                votes[track.key] = track
+        existing = votes.get(track.key)
+        if existing is None:
+            votes[track.key] = track
+            return None
+        existing.hits += 1
+        return existing if existing.hits >= 2 else None
 
-        if index < len(offsets):
-            await asyncio.sleep(0.7)  # Shazam limitlariga hurmat
-
-    if votes:
+    def best_so_far() -> Track | None:
+        if not votes:
+            return None
         best = max(votes.values(), key=lambda t: t.hits)
         best.attempts = attempts
         return best
 
-    # Oxirgi urinish: kattaroq bo'lak (shazamio uni o'zi qismlarga bo'lib qidiradi)
-    if duration > 3.0:
-        if on_progress:
-            try:
-                await on_progress(0, 0)   # 0, 0 = "chuqurroq qidiruv" belgisi
-            except Exception:  # noqa: BLE001
-                pass
-        long_clip = clips_dir / "long.wav"
-        try:
-            length = min(60.0, duration)
-            start = max(0.0, (duration - length) / 2)
-            await cut_clip(wav_path, long_clip, start, length)
-            track = _parse_shazam(await _shazam_recognize(long_clip, timeout=120))
-            long_clip.unlink(missing_ok=True)
-            if track:
-                track.attempts = attempts + 1
-                return track
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Uzun bo'lak bo'yicha qidiruv o'tkazib yuborildi: %s", exc)
+    # 1-bosqich: oddiy bo'laklar
+    for index, offset in enumerate(offsets, start=1):
+        await note(index, len(offsets))
+        found = await probe(offset, clip_len, None, f"a{index}")
+        if found:
+            found.attempts = attempts
+            return found
+        if index < len(offsets):
+            await asyncio.sleep(0.7)      # Shazam limitlariga hurmat
+    if votes:
+        return best_so_far()
 
-    # Shazam topa olmadi - ACRCloud zaxirasi (agar sozlangan bo'lsa)
+    # 2-bosqich: ovozni kuchaytirib, uzunroq bo'laklar bilan qayta tinglaymiz
+    await note(0, 0)
+    for index, offset in enumerate(offsets[:3], start=1):
+        found = await probe(offset, clip_len * 1.6, ENHANCE_FILTER, f"b{index}")
+        if found:
+            found.attempts = attempts
+            return found
+        await asyncio.sleep(0.7)
+    if votes:
+        return best_so_far()
+
+    # 3-bosqich: tezligi kuchli o'zgartirilgan musiqa.
+    # Diqqat: bu bosqichda tovush balandligi sun'iy o'zgargani uchun noto'g'ri
+    # moslik chiqishi mumkin, shuning uchun natija faqat ikki marta
+    # takrorlansa qabul qilinadi.
+    if duration >= 6.0:
+        await note(0, -1)
+        speed_offsets = offsets[:2] or [0.0]
+        for factor in SPEED_FIXES:
+            for index, offset in enumerate(speed_offsets, start=1):
+                name = f"c{str(factor).replace('.', '')}_{index}"
+                found = await probe(offset, clip_len * 1.3, speed_filter(factor), name)
+                if found:
+                    log.info("Tezligi %.2fx ga qaytarilgandan keyin topildi", factor)
+                    found.attempts = attempts
+                    return found
+                await asyncio.sleep(0.5)
+
+    # 4-bosqich: bitta uzun bo'lak (shazamio uni o'zi qismlarga bo'ladi)
+    if duration > 3.0:
+        await note(0, 0)
+        found = await probe(
+            max(0.0, (duration - min(60.0, duration)) / 2),
+            min(60.0, duration),
+            None,
+            "long",
+            timeout=120,
+        )
+        if found:
+            found.attempts = attempts
+            return found
+
+    # Tasdiqlanmagan bo'lsa ham, bitta moslik bo'lsa - shuni qaytaramiz
+    if votes:
+        return best_so_far()
+
+    # 5-bosqich: ACRCloud zaxirasi (agar sozlangan bo'lsa)
     if config.ACR_ENABLED:
         clip_path = clips_dir / "acr.wav"
         try:
@@ -309,3 +382,60 @@ async def identify(wav_path: Path, on_progress=None) -> Track | None:
             log.warning("ACRCloud bosqichi o'tkazib yuborildi: %s", exc)
 
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Nom bo'yicha qidirish (havolasiz)
+# --------------------------------------------------------------------------- #
+_ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
+
+
+async def search_by_name(query: str) -> Track | None:
+    """Qo'shiq nomi bo'yicha ma'lumot topadi (Apple/iTunes katalogi).
+
+    Shazam'ning katalog qidiruvi ishlamay qolgani uchun iTunes API
+    ishlatiladi: u bepul, kalitsiz va muqova hamda audio parchani ham beradi.
+    """
+    import aiohttp
+
+    clean = " ".join((query or "").split())[:120]
+    if len(clean) < 2:
+        return None
+
+    params = {"term": clean, "entity": "song", "limit": "1"}
+    try:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(_ITUNES_SEARCH_URL, params=params) as resp:
+                if resp.status != 200:
+                    log.info("iTunes qidiruvi javob bermadi: HTTP %s", resp.status)
+                    return None
+                payload = await resp.json(content_type=None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("iTunes qidiruvida xato: %s", exc)
+        return None
+
+    results = (payload or {}).get("results") or []
+    if not results:
+        return None
+    item = results[0]
+
+    title = (item.get("trackName") or "").strip()
+    artist = (item.get("artistName") or "").strip()
+    if not title:
+        return None
+
+    cover = (item.get("artworkUrl100") or "").replace("100x100", "600x600") or None
+    released = (item.get("releaseDate") or "")[:4] or None
+    return Track(
+        title=title,
+        artist=artist or "Noma'lum ijrochi",
+        key=f"itunes|{item.get('trackId') or title}".lower(),
+        album=(item.get("collectionName") or "").strip() or None,
+        released=released,
+        genre=(item.get("primaryGenreName") or "").strip() or None,
+        cover=cover,
+        url=item.get("trackViewUrl"),
+        preview=item.get("previewUrl"),
+        source="Apple Music",
+    )
