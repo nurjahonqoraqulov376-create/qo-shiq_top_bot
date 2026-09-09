@@ -65,6 +65,9 @@ BOT_USERNAME: str = ""
 # Telegram bot tokeni ko'rinishi: 123456789:AA...
 TOKEN_RE = re.compile(r"^\d{5,}:[A-Za-z0-9_-]{30,}$")
 
+# Telegram bot API orqali fayl yuklab olish chegarasi (20 MB)
+TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+
 router = Router()
 
 _download_sem = asyncio.Semaphore(config.MAX_CONCURRENT_DOWNLOADS)
@@ -698,6 +701,114 @@ async def on_variant(callback: CallbackQuery) -> None:
 
     await callback.answer(f"{variant.label} tayyorlanmoqda...")
     await deliver_variant(message, job, Track(**job.result), key)
+
+
+@router.message(F.video | F.video_note | F.audio | F.voice | F.document)
+async def on_media(message: Message) -> None:
+    """Foydalanuvchi videoni (yoki ovozni) to'g'ridan-to'g'ri yuborganda.
+
+    Instagram/YouTube havolani bermay qo'yganda ham ishlaydigan yo'l:
+    foydalanuvchi videoni «Share → Telegram» orqali botga yuboradi.
+    """
+    media = (
+        message.video
+        or message.video_note
+        or message.audio
+        or message.voice
+        or message.document
+    )
+    if media is None:
+        return
+
+    mime = (getattr(media, "mime_type", "") or "").lower()
+    if message.document and not (mime.startswith("video/") or mime.startswith("audio/")):
+        await message.answer(texts.NO_URL)
+        return
+
+    user_id = message.from_user.id if message.from_user else message.chat.id
+    if not security.is_allowed_user(user_id):
+        await message.answer(texts.NOT_ALLOWED)
+        return
+    if user_id in _busy_users:
+        await message.answer(texts.BUSY)
+        return
+
+    size = getattr(media, "file_size", 0) or 0
+    if size > TELEGRAM_DOWNLOAD_LIMIT:
+        await message.answer(texts.MEDIA_TOO_BIG)
+        return
+
+    warning = security.rate_check(security.limiter, user_id)
+    if warning:
+        await message.answer(warning)
+        return
+
+    _busy_users.add(user_id)
+    status = await message.answer(texts.MEDIA_RECEIVED)
+    work_dir = config.DOWNLOAD_DIR / f"m_{storage.new_token()[:12]}"
+    token: str | None = None
+    try:
+        work_dir.mkdir(parents=True, exist_ok=True)
+        source = work_dir / "input.bin"
+        await message.bot.download(media, destination=source)
+
+        wav = work_dir / "audio.wav"
+        try:
+            await extract_audio(source, wav)
+        except AudioError as exc:
+            log.info("Yuborilgan faylda ovoz yo'q: %s", exc)
+            await safe_edit(status, texts.NO_AUDIO)
+            shutil.rmtree(work_dir, ignore_errors=True)
+            return
+
+        token = storage.new_token()
+        job = Job(
+            token=token,
+            user_id=user_id,
+            chat_id=message.chat.id,
+            url="",
+            title=texts.MEDIA_TITLE,
+            work_dir=str(work_dir),
+            audio_path=str(wav),
+        )
+        await storage.put(job)
+
+        async def on_progress(step: int, total: int) -> None:
+            if total < 0:
+                await safe_edit(status, texts.SEARCHING_SPEED)
+            elif total == 0:
+                await safe_edit(status, texts.SEARCHING_DEEP)
+            else:
+                await safe_edit(
+                    status, texts.SEARCHING_STEP.format(step=step, total=total)
+                )
+
+        track = await identify(wav, on_progress=on_progress)
+        if track is None:
+            await safe_edit(status, texts.NOT_FOUND)
+            await storage.drop(token)
+            return
+
+        job.result = asdict(track)
+        await storage.update(job)
+        await safe_delete(status)
+        status = None
+        if not await deliver_variant(message, job, track, variants.AUTO_KEY):
+            await storage.drop(token)
+
+    except TelegramAPIError as exc:
+        log.warning("Faylni olishda xato: %s", exc)
+        await safe_edit(status, texts.MEDIA_FAILED)
+        shutil.rmtree(work_dir, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        log.exception("Yuborilgan faylni qayta ishlashda xato")
+        await safe_edit(status, texts.ERROR)
+        if token:
+            await storage.drop(token)
+        else:
+            shutil.rmtree(work_dir, ignore_errors=True)
+    finally:
+        _busy_users.discard(user_id)
 
 
 @router.message()

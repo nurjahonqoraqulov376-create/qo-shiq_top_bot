@@ -189,10 +189,12 @@ def _friendly_error(message: str) -> str:
     if "private" in low or "unavailable" in low or "has been removed" in low:
         return "Bu post yopiq (private) yoki o'chirilgan — video yuklab bo'lmadi."
     if _needs_cookies(low):
+        # Foydalanuvchiga ishlaydigan yo'l ko'rsatamiz: videoning o'zini yuborish
         return (
-            "🔒 Sayt bu videoni faqat tizimga kirgan foydalanuvchilarga ko'rsatyapti, "
-            "shuning uchun yuklab bo'lmadi.\n"
-            "Ochiq (hammaga ko'rinadigan) havola yuboring."
+            "🔒 Sayt bu videoni yuklab olishga ruxsat bermadi.\n\n"
+            "✅ <b>Yechim:</b> videoni menga to'g'ridan-to'g'ri yuboring — "
+            "qo'shig'ini shundan topib beraman.\n"
+            "<i>Instagram'da: video ostidagi «Share» → Telegram → shu bot.</i>"
         )
     if "max-filesize" in low or "larger than" in low:
         return (

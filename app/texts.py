@@ -3,8 +3,10 @@ from __future__ import annotations
 
 START = (
     "🎵 <b>Xush kelibsiz!</b>\n\n"
-    "Video havolasini yuboring — qo'shig'ini topib beraman.\n"
-    "Yoki shunchaki qo'shiq nomini yozing."
+    "Qo'shiqni topish uchun menga quyidagilardan birini yuboring:\n"
+    "• video <b>havolasi</b>;\n"
+    "• <b>videoning o'zi</b> (eng ishonchli yo'l);\n"
+    "• qo'shiq <b>nomi</b>."
 )
 
 HELP = (
@@ -104,6 +106,17 @@ DISK_BUSY = (
 )
 
 WRONG_CHAT = "⚠️ Bu tugma boshqa suhbatga tegishli."
+
+# --------------------------------------------------------------------------- #
+# To'g'ridan-to'g'ri yuborilgan video/audio
+# --------------------------------------------------------------------------- #
+MEDIA_RECEIVED = "🎧 Qabul qilindi, qo'shiq qidirilmoqda..."
+MEDIA_TITLE = "Yuborilgan fayl"
+MEDIA_FAILED = "❌ Faylni olib bo'lmadi. Qaytadan yuborib ko'ring."
+MEDIA_TOO_BIG = (
+    "⚠️ Fayl juda katta (Telegram botlarga 20 MB gacha ruxsat beradi).\n"
+    "Qisqaroq bo'lagini yuboring."
+)
 
 # --------------------------------------------------------------------------- #
 # Audio variantlari
