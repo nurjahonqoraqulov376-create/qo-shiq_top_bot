@@ -34,8 +34,24 @@ from aiogram.types import (
 )
 
 from . import config, security, storage, texts, variants
-from .audio import AudioError, ensure_mp4, extract_audio, wav_duration
-from .downloader import DownloadError, Video, download, download_song, find_url
+from .audio import (
+    AudioError,
+    ensure_mp4,
+    extract_audio,
+    has_audio_stream,
+    merge_audio,
+    wav_duration,
+)
+from .downloader import (
+    DownloadError,
+    Song,
+    Video,
+    download,
+    download_preview,
+    download_song,
+    download_track_audio,
+    find_url,
+)
 from .ffmpeg_setup import ensure_ffmpeg
 from .recognizer import Track, identify
 from .security import RateLimiter, safe_link
@@ -146,6 +162,36 @@ async def cmd_help(message: Message) -> None:
 # --------------------------------------------------------------------------- #
 # Havola qabul qilish
 # --------------------------------------------------------------------------- #
+async def restore_audio(video: Video, url: str) -> None:
+    """Ovozsiz yuklangan videoga ovozni qaytaradi.
+
+    yt-dlp ba'zan video va audio oqimlarini birlashtira olmaydi - natijada
+    ovozsiz fayl qoladi. Bunda ham video jimjit chiqadi, ham qo'shiqni
+    aniqlab bo'lmaydi. Shuning uchun ovozni alohida yuklab, qayta qo'shamiz.
+    """
+    try:
+        if await has_audio_stream(video.path):
+            return
+    except Exception as exc:  # noqa: BLE001
+        log.debug("Ovozni tekshirib bo'lmadi: %s", exc)
+        return
+
+    log.info("Video ovozsiz keldi, ovoz alohida yuklanmoqda: %s", url)
+    try:
+        sound = await download_track_audio(url, video.work_dir)
+        merged = video.work_dir / "video_sound.mp4"
+        await merge_audio(video.path, sound, merged)
+    except (DownloadError, AudioError) as exc:
+        log.info("Ovozni qaytarib bo'lmadi (%s): %s", url, exc)
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("Ovozni qaytarishda kutilmagan xato")
+        return
+
+    video.path = merged
+    log.info("Videoga ovoz qo'shildi: %s", merged.name)
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 @router.message(F.caption)          # havola rasm/video izohida kelgan holat
 async def on_link(message: Message) -> None:
@@ -194,6 +240,10 @@ async def on_link(message: Message) -> None:
             title=video.title,
             work_dir=str(video.work_dir),
         )
+
+        # Yuklangan faylda ovoz bo'lmasa (yt-dlp birlashtira olmagan bo'lsa),
+        # ovozni alohida yuklab, videoga qaytadan qo'shamiz
+        await restore_audio(video, url)
 
         # Audio darhol ajratiladi - tugma bosilganda javob tez bo'lishi uchun
         try:
@@ -391,6 +441,24 @@ async def fetch_cover(url: str, work_dir: Path) -> Path | None:
     return thumb
 
 
+async def fetch_song_audio(track: Track, work_dir: Path) -> Song:
+    """Qo'shiq audiosini topadi: YouTube → SoundCloud → Apple parchasi.
+
+    YouTube server IP'sini "bot" deb bloklashi mumkin, shuning uchun
+    bir nechta manba ketma-ket sinaladi. Oxirgi zaxira - Shazam bergan
+    ~30 soniyalik Apple parchasi: u hech qachon bloklanmaydi.
+    """
+    query = f"{track.artist} {track.title}".strip()
+    try:
+        return await download_song(query, work_dir=work_dir)
+    except DownloadError as exc:
+        if not track.preview:
+            raise
+        log.info("To'liq audio topilmadi (%s), Apple parchasi ishlatiladi", exc)
+
+    return await download_preview(track.preview, work_dir)
+
+
 async def deliver_variant(message: Message, job: Job, track: Track, key: str) -> bool:
     """Variantni tayyorlab, audio qilib yuboradi. Yuborilsa True qaytaradi."""
     variant = variants.get(key)
@@ -399,7 +467,9 @@ async def deliver_variant(message: Message, job: Job, track: Track, key: str) ->
 
     token = job.token
     audio_title = f"{track.title}{variant.suffix}"
-    caption = texts.audio_caption(esc(track.artist), esc(audio_title), BOT_USERNAME)
+    caption = texts.audio_caption(
+        esc(track.artist), esc(audio_title), BOT_USERNAME, job.song_is_preview
+    )
     keyboard = variant_keyboard(token, key)
 
     # 1) Avval yuborilgan bo'lsa - Telegram file_id orqali bir zumda qaytaramiz
@@ -433,13 +503,16 @@ async def deliver_variant(message: Message, job: Job, track: Track, key: str) ->
         if song_path is None or not song_path.exists():
             await safe_edit(status, texts.AUDIO_SEARCHING)
             async with _download_sem:
-                song = await download_song(
-                    f"{track.artist} {track.title}", work_dir=work_dir
-                )
+                song = await fetch_song_audio(track, work_dir)
             job.song_path = str(song.path)
             job.song_duration = song.duration
+            job.song_is_preview = song.is_preview
             await storage.update(job)
             song_path = song.path
+            if song.is_preview:
+                caption = texts.audio_caption(
+                    esc(track.artist), esc(audio_title), BOT_USERNAME, True
+                )
 
         # 3) Muqova (ixtiyoriy - bo'lmasa ham audio yuboriladi)
         thumb = Path(job.thumb_path) if job.thumb_path else None

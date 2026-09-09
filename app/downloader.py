@@ -9,6 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import yt_dlp
 
@@ -263,9 +264,16 @@ def _download_sync(url: str, work_dir: Path, cookies: tuple[str, str | None]) ->
                 path = Path(candidate)
                 break
     if path is None:
-        files = sorted(work_dir.glob("video.*"), key=lambda p: p.stat().st_size, reverse=True)
-        if files:
-            path = files[0]
+        # Diqqat: yt-dlp alohida bo'laklarni "video.f137.mp4" deb nomlaydi.
+        # Ular ovozsiz bo'lishi mumkin, shuning uchun avval birlashtirilgan
+        # faylni ("video.mp4") qidiramiz.
+        merged = [f for f in work_dir.glob("video.*") if f.stem == "video"]
+        parts = [f for f in work_dir.glob("video.*") if f.stem != "video"]
+        for group in (merged, parts):
+            files = sorted(group, key=lambda p: p.stat().st_size, reverse=True)
+            if files:
+                path = files[0]
+                break
     if path is None or not path.exists():
         raise DownloadError("Yuklangan fayl topilmadi.")
 
@@ -284,12 +292,26 @@ def _download_sync(url: str, work_dir: Path, cookies: tuple[str, str | None]) ->
 
 @dataclass(slots=True)
 class Song:
-    """Topilgan qo'shiqning to'liq audiosi."""
+    """Topilgan qo'shiqning audiosi."""
 
     path: Path
     title: str
     duration: float
     webpage_url: str
+    source: str = "YouTube"
+    is_preview: bool = False        # faqat ~30 soniyalik parcha bo'lsa True
+
+
+# Qo'shiq audiosi qayerdan qidiriladi. Serverning IP manzilini YouTube ba'zan
+# "bot" deb bloklaydi, shuning uchun zaxira manbalar ham bor.
+SONG_SOURCES: tuple[tuple[str, str], ...] = (
+    ("YouTube", "ytsearch1:"),
+    ("SoundCloud", "scsearch1:"),
+)
+
+# Apple preview faqat shu manzillardan yuklanadi (SSRF himoyasi)
+_PREVIEW_HOST_SUFFIXES = (".apple.com", ".mzstatic.com")
+_PREVIEW_MAX_MB = 20
 
 
 def _song_opts(work_dir: Path, cookies: tuple[str, str | None]) -> dict:
@@ -377,34 +399,155 @@ async def download_song(query: str, work_dir: Path | None = None) -> Song:
     plan = _cookie_plan()
     last_error = "Qo'shiq audiosini topib bo'lmadi."
 
-    for index, cookies in enumerate(plan):
-        if owns_dir:
-            target = DOWNLOAD_DIR / f"song_{uuid.uuid4().hex[:12]}"
-        else:
-            target = work_dir  # type: ignore[assignment]
-        target.mkdir(parents=True, exist_ok=True)
+    # Har bir manba (YouTube, SoundCloud) o'z navbatida sinaladi. YouTube
+    # server IP'sini bloklasa, qolganlari ishlashda davom etadi.
+    for source_name, prefix in SONG_SOURCES:
+        for index, cookies in enumerate(plan):
+            if owns_dir:
+                target = DOWNLOAD_DIR / f"song_{uuid.uuid4().hex[:12]}"
+            else:
+                target = work_dir  # type: ignore[assignment]
+            target.mkdir(parents=True, exist_ok=True)
+            try:
+                song = await loop.run_in_executor(
+                    None, _download_song_sync, prefix + clean, target, cookies
+                )
+                song.source = source_name
+                if source_name != SONG_SOURCES[0][0]:
+                    log.info("Qo'shiq %s dan olindi: %s", source_name, clean)
+                return song
+            except DownloadError as exc:
+                if owns_dir:
+                    shutil.rmtree(target, ignore_errors=True)
+                last_error = str(exc)
+                break            # bu manbada topilmadi - keyingisiga o'tamiz
+            except Exception as exc:  # noqa: BLE001
+                if owns_dir:
+                    shutil.rmtree(target, ignore_errors=True)
+                raw = str(exc)
+                log.warning("Qo'shiq yuklanmadi (%s, %s): %s",
+                            source_name, cookies[0], raw)
+                hint = admin_hint(raw)
+                if hint:
+                    log.warning("Bot egasiga maslahat: %s", hint)
+                last_error = raw
+                if index + 1 < len(plan) and _needs_cookies(raw):
+                    continue     # cookie'lar bilan qayta urinamiz
+                break            # keyingi manbaga o'tamiz
+
+    raise DownloadError(_friendly_error(last_error))
+
+
+def _download_track_audio_sync(
+    url: str, work_dir: Path, cookies: tuple[str, str | None]
+) -> Path:
+    opts = _ydl_opts(work_dir, cookies)
+    opts.update({
+        "outtmpl": str(work_dir / "sound.%(ext)s"),
+        "format": "bestaudio/best",
+        "max_filesize": SONG_MAX_MB * 1024 * 1024,
+    })
+    opts.pop("merge_output_format", None)
+
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+    if info is None:
+        raise DownloadError("Ovoz yo'lakchasi topilmadi.")
+    if info.get("_type") in ("playlist", "compat_list"):
+        entries = [e for e in (info.get("entries") or []) if e]
+        if not entries:
+            raise DownloadError("Ovoz yo'lakchasi topilmadi.")
+        info = entries[0]
+
+    for downloaded in info.get("requested_downloads") or []:
+        candidate = downloaded.get("filepath")
+        if candidate and Path(candidate).exists():
+            return Path(candidate)
+    files = sorted(work_dir.glob("sound.*"), key=lambda p: p.stat().st_size, reverse=True)
+    if not files:
+        raise DownloadError("Ovoz fayli yuklanmadi.")
+    return files[0]
+
+
+async def download_track_audio(url: str, work_dir: Path) -> Path:
+    """Videoning ovoz yo'lakchasini alohida yuklaydi.
+
+    yt-dlp video va audioni birlashtira olmagan (yoki sayt faqat ovozsiz
+    ko'rinish bergan) hollarda ishlatiladi.
+    """
+    loop = asyncio.get_running_loop()
+    work_dir.mkdir(parents=True, exist_ok=True)
+    last_error = "Ovoz yo'lakchasini yuklab bo'lmadi."
+
+    for index, cookies in enumerate(_cookie_plan()):
         try:
             return await loop.run_in_executor(
-                None, _download_song_sync, f"ytsearch1:{clean}", target, cookies
+                None, _download_track_audio_sync, url, work_dir, cookies
             )
-        except DownloadError:
-            if owns_dir:
-                shutil.rmtree(target, ignore_errors=True)
-            raise
+        except DownloadError as exc:
+            last_error = str(exc)
+            break
         except Exception as exc:  # noqa: BLE001
-            if owns_dir:
-                shutil.rmtree(target, ignore_errors=True)
             raw = str(exc)
-            log.warning("Qo'shiq yuklanmadi (%s): %s", cookies[0], raw)
-            hint = admin_hint(raw)
-            if hint:
-                log.warning("Bot egasiga maslahat: %s", hint)
+            log.info("Ovozni alohida yuklash muvaffaqiyatsiz (%s): %s",
+                     cookies[0], raw[:160])
             last_error = raw
-            if index + 1 < len(plan) and _needs_cookies(raw):
+            if index + 1 < len(_cookie_plan()) and _needs_cookies(raw):
                 continue
             break
 
     raise DownloadError(_friendly_error(last_error))
+
+
+async def download_preview(url: str, work_dir: Path) -> Song:
+    """Apple'ning ~30 soniyalik parchasini yuklaydi (oxirgi zaxira).
+
+    YouTube ham, SoundCloud ham ishlamaganda ishlatiladi. Havola Shazam'dan
+    keladi, shuning uchun manzil Apple domenlari bilan cheklangan.
+    """
+    import aiohttp
+
+    parts = urlsplit(url or "")
+    host = (parts.hostname or "").lower()
+    if parts.scheme != "https" or not host.endswith(_PREVIEW_HOST_SUFFIXES):
+        raise DownloadError("Qo'shiq parchasi uchun havola yaroqsiz.")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    out_path = work_dir / "preview.m4a"
+    limit = _PREVIEW_MAX_MB * 1024 * 1024
+    try:
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers={"User-Agent": _UA}) as resp:
+                if resp.status != 200:
+                    raise DownloadError(f"Parcha yuklanmadi (HTTP {resp.status}).")
+                size = 0
+                with out_path.open("wb") as fh:
+                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                        size += len(chunk)
+                        if size > limit:
+                            raise DownloadError("Parcha kutilganidan katta.")
+                        fh.write(chunk)
+    except DownloadError:
+        out_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        out_path.unlink(missing_ok=True)
+        log.warning("Apple parchasi yuklanmadi: %s", exc)
+        raise DownloadError("Qo'shiq parchasini yuklab bo'lmadi.") from exc
+
+    if not out_path.exists() or out_path.stat().st_size < 1024:
+        raise DownloadError("Qo'shiq parchasi bo'sh chiqdi.")
+
+    log.info("Apple parchasi ishlatildi (%.1f KB)", out_path.stat().st_size / 1024)
+    return Song(
+        path=out_path,
+        title="",
+        duration=0.0,
+        webpage_url=url,
+        source="Apple Music",
+        is_preview=True,
+    )
 
 
 async def download(url: str) -> Video:

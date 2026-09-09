@@ -80,6 +80,42 @@ async def cut_clip(src_wav: Path, out_path: Path, start: float, length: float) -
     return out_path
 
 
+async def has_audio_stream(path: Path) -> bool:
+    """Faylda ovoz yo'lakchasi bormi? (ffprobe'siz, ffmpeg chiqishi bo'yicha)"""
+    ffmpeg = ensure_ffmpeg()
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg, "-hide_banner", "-i", str(path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return False
+    # ffmpeg chiqish fayli berilmagani uchun xato bilan tugaydi - bu normal,
+    # bizga faqat oqimlar ro'yxati kerak.
+    return "Audio:" in (stderr or b"").decode("utf-8", "ignore")
+
+
+async def merge_audio(video_path: Path, audio_path: Path, out_path: Path) -> Path:
+    """Ovozsiz videoga alohida yuklangan audioni qo'shadi."""
+    ffmpeg = ensure_ffmpeg()
+    await run_ffmpeg([
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", "-shortest",
+        str(out_path),
+    ], timeout=300)
+    if not out_path.exists() or out_path.stat().st_size == 0:
+        raise AudioError("Videoga ovoz qo'shib bo'lmadi.")
+    return out_path
+
+
 async def ensure_mp4(video_path: Path) -> Path:
     """Fayl mp4 bo'lmasa, uni qayta kodlamasdan mp4 ga o'raydi.
 

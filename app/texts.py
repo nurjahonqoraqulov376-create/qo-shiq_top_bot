@@ -46,9 +46,13 @@ def video_caption(bot_username: str) -> str:
     return "📥 Video yuklab olindi"
 
 
-def audio_caption(artist: str, title: str, bot_username: str) -> str:
+def audio_caption(
+    artist: str, title: str, bot_username: str, preview: bool = False
+) -> str:
     """Yuborilgan audio ostidagi izoh."""
     lines = [f"🎵 <b>{title}</b>", f"👤 {artist}"]
+    if preview:
+        lines.append("🔸 <i>Qisqa parcha — to'liq versiyasi topilmadi</i>")
     if bot_username:
         lines += [
             "",

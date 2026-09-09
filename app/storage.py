@@ -39,6 +39,7 @@ class Job:
     not_found: bool = False             # qidirildi, lekin topilmadi
     song_path: str | None = None        # qo'shiqning to'liq audiosi
     song_duration: float = 0.0
+    song_is_preview: bool = False   # faqat 30 soniyalik parcha bo'lsa
     thumb_path: str | None = None       # muqova (Telegram uchun 320x320)
     # variant kaliti -> Telegram file_id (qayta yuborishda tez ishlaydi)
     audio_ids: dict = field(default_factory=dict)

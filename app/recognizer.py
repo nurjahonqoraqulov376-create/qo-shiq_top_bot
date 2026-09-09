@@ -30,6 +30,7 @@ class Track:
     genre: str | None = None
     cover: str | None = None
     url: str | None = None
+    preview: str | None = None      # Apple'ning ~30s audio parchasi (zaxira manba)
     source: str = "Shazam"
     hits: int = 1
     attempts: int = 0
@@ -109,8 +110,16 @@ def _parse_shazam(data: dict | None) -> Track | None:
         or (track.get("share") or {}).get("image")
     )
 
-    links: dict[str, str] = {}
+    # Apple preview - YouTube bloklangan holatda zaxira audio manbasi
     hub = track.get("hub") or {}
+    preview = None
+    for action in hub.get("actions") or []:
+        uri = (action.get("uri") or "").strip()
+        if uri.startswith("https://") and ".m4a" in uri:
+            preview = uri
+            break
+
+    links: dict[str, str] = {}
     for provider in hub.get("providers") or []:
         name = (provider.get("type") or "").strip()
         actions = provider.get("actions") or []
@@ -135,6 +144,7 @@ def _parse_shazam(data: dict | None) -> Track | None:
         genre=genre,
         cover=cover,
         url=track.get("url") or (track.get("share") or {}).get("href"),
+        preview=preview,
         source="Shazam",
         listen_links=links,
     )
